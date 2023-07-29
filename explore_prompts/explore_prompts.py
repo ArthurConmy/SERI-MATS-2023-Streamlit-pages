@@ -371,7 +371,7 @@ if DO_QUERYSIDE_PROJECTIONS:
         model.reset_hooks()
 
         normalized_queries = einops.repeat(
-            5 * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+            normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
@@ -389,10 +389,10 @@ if DO_QUERYSIDE_PROJECTIONS:
             layer_idx = 10,
             head_idx = 7,
             use_tqdm = False,
-            normalize_queries = False, 
+            normalize_queries = True, 
             normalize_keys = True,
             add_query_bias = True, 
-            add_key_bias = False,
+            add_key_bias = True,
         )
 
         attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
