@@ -252,8 +252,8 @@ mean_head_output = einops.reduce(
 
 head_logit_lens = einops.einsum(
     head_out / head_out.norm(dim=-1, keepdim=True),
-    model.W_U.T,
-    "b s d_head, d_vocab d_model -> b s d_vocab",
+    model.W_U,
+    "b s d_model, d_model d_vocab -> b s d_vocab",
 )
 
 #%%
@@ -261,7 +261,7 @@ head_logit_lens = einops.einsum(
 top_answers = torch.topk(
     head_logit_lens,
     dim=-1,
-    k=10,
+    k=20,
 ).indices
 
 #%%
@@ -369,7 +369,7 @@ if DO_QUERYSIDE_PROJECTIONS:
         model.reset_hooks()
 
         normalized_queries = einops.repeat(
-            normalize(pre_state[batch_idx, seq_idx, :])* np.sqrt(model.cfg.d_model),
+            10 * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
@@ -393,26 +393,35 @@ if DO_QUERYSIDE_PROJECTIONS:
 
         attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
 
-        if batch_idx>3:
+        if batch_idx==2:
             warnings.warn("Early")
             break
 
 #%%
 
 true_attention_pattern = attn_scores.clone().softmax(dim=-1)
+attention_score_projections[:, :, 0] = -100_000 # temporarily kill BOS
 fake_attention_pattern = attention_score_projections.clone().softmax(dim=-1)
+fake_attention_pattern *= (-true_attention_pattern[:, :, 0] + 1.0).unsqueeze(-1) # so that BOS equal to original value
+fake_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still have attention 1.0
 
 #%%
 
 CUTOFF = 30
 BATCH_INDEX = 2 # 2 is great!
 
-for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, fake_attention_pattern], strict=True):
+# for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, fake_attention_pattern], strict=True):
+
+# set range -10 10
+
+for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_score_projections], strict=True):  
     imshow(
         attention_pattern[BATCH_INDEX, :CUTOFF, :CUTOFF],
         x = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
         y = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
         title = name,
+        zmin = -10, 
+        zmax = 10,
     )
 
 #%%
