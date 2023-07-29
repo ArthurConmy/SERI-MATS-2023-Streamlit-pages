@@ -158,6 +158,8 @@ DATA_TOKS, DATA_STR_TOKS_PARSED = process_webtext(verbose=True) # indices=list(r
 BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 
 NUM_MINIBATCHES = 1 # previouly 3
+DO_KEYSIDE_PROJECTIONS = False
+DO_QUERYSIDE_PROJECTIONS = True
 
 MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
 MINIBATCH_DATA_TOKS = [DATA_TOKS[i*MINIBATCH_SIZE:(i+1)*MINIBATCH_SIZE] for i in range(NUM_MINIBATCHES)]
@@ -222,7 +224,7 @@ resid_pre1_name = get_act_name("resid_pre", 5)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
-    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name] + ([get_act_name("attn_scores", 10)] if TESTING else []),
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name] + ([get_act_name("attn_scores", 10)] if (TESTING or DO_QUERYSIDE_PROJECTIONS) else []),
 )
 
 pre_state = cache[get_act_name("resid_pre", 10)]
@@ -231,7 +233,7 @@ head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
 resid_pre1 = cache[resid_pre1_name]
 
-if TESTING:
+if TESTING or DO_QUERYSIDE_PROJECTIONS:
     attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
 
 del cache
@@ -307,24 +309,61 @@ for batch_idx in range(BATCH_SIZE):
 keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
 keyside_orthogonals = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
 
-for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):
-    
-    project_onto = None
-    project_onto = my_embeddings[batch_idx, seq_idx]
+if DO_KEYSIDE_PROJECTIONS:
+    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):
+        
+        project_onto = None
+        project_onto = my_embeddings[batch_idx, seq_idx]
 
-    keyside_vector, keyside_orthogonal = original_project(
-        normalize(pre_state[batch_idx, seq_idx]) * np.sqrt(model.cfg.d_model), # simulate LN
-        project_onto,
-        test = False,
-    )
+        keyside_vector, keyside_orthogonal = original_project(
+            normalize(pre_state[batch_idx, seq_idx]) * np.sqrt(model.cfg.d_model), # simulate LN
+            project_onto,
+            test = False,
+        )
 
-    if seq_idx != 0:
-        keyside_projections[batch_idx, seq_idx] = keyside_vector
-        keyside_orthogonals[batch_idx, seq_idx] = keyside_orthogonal
+        if seq_idx != 0:
+            keyside_projections[batch_idx, seq_idx] = keyside_vector
+            keyside_orthogonals[batch_idx, seq_idx] = keyside_orthogonal
 
-    else: # BOS seems weird
-        keyside_projections[batch_idx, seq_idx] = keyside_vector + keyside_orthogonal
-        keyside_orthogonals[batch_idx, seq_idx] = 0.0
+        else: # BOS seems weird
+            keyside_projections[batch_idx, seq_idx] = keyside_vector + keyside_orthogonal
+            keyside_orthogonals[batch_idx, seq_idx] = 0.0
+
+else:
+    keyside_projections[:] = pre_state.clone()
+    keyside_orthogonals[:] = 0.0
+
+#%%
+
+attention_score_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, SEQ_LEN-1)).to(model.cfg.device)
+
+if DO_QUERYSIDE_PROJECTIONS:
+    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):    
+        model.reset_hooks()
+
+        unnormalized_queries = einops.repeat(
+            pre_state[batch_idx, seq_idx, :],
+            "d_model -> seq_len d_model",
+            seq_len = seq_idx+1,
+        )
+        # project each onto the relevant unembedding
+        unnormalized_queries, _ = original_project(
+            unnormalized_queries,
+            model.W_U.T[_DATA_TOKS[batch_idx, :seq_idx+1]],
+            test=False,
+        )
+
+        current_attention_scores = dot_with_query(
+            unnormalized_keys = keyside_projections[batch_idx, :seq_idx+1, :],
+            unnormalized_queries = unnormalized_queries,
+            model = model,
+            layer_idx = 10,
+            head_idx = 7,
+            use_tqdm = False,
+        )
+
+else:
+    attention_score_projections[:] = current_attention_scores.clone()
 
 #%%
 
@@ -347,15 +386,24 @@ model.set_use_split_qkv_normalized_input(True)
 model.reset_hooks()
 
 # # Add the hook approximation
-model.add_hook(
-    get_act_name("k_normalized_input", 10),
-    partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
-    level=1,
-)
+
+if DO_QUERYSIDE_PROJECTIONS:
+    model.add_hook(
+        get_act_name("attn_scores", 10),
+        partial(set_to_value, head_idx=7, new_value=attention_score_projections.cuda()),
+    )
+
+elif DO_KEYSIDE_PROJECTIONS:
+    model.add_hook(
+        get_act_name("k_normalized_input", 10),
+        partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
+        level=1,
+    )
 
 #%%
 
 projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
+model.reset_hooks()
 
 #%%
 
