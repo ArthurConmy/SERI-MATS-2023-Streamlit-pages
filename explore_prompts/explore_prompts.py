@@ -98,7 +98,7 @@ model = HookedTransformer.from_pretrained(
     center_writing_weights=True,
     fold_ln=True,
     device="cuda"
-    # fold value bias?
+    # fold value bizas?
 )
 model.set_use_split_qkv_input(False)
 model.set_use_attn_result(True)
@@ -250,6 +250,22 @@ mean_head_output = einops.reduce(
 
 #%%
 
+head_logit_lens = einops.einsum(
+    head_out / head_out.norm(dim=-1, keepdim=True),
+    model.W_U.T,
+    "b s d_head, d_vocab d_model -> b s d_vocab",
+)
+
+#%%
+
+top_answers = torch.topk(
+    head_logit_lens,
+    dim=-1,
+    k=10,
+).indices
+
+#%%
+
 head_loss = get_metric_from_end_state(
     model = model,
     end_state = end_state - head_out + mean_head_output.unsqueeze(0).unsqueeze(0).clone(),
@@ -338,34 +354,73 @@ else:
 attention_score_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, SEQ_LEN-1)).to(model.cfg.device)
 attention_score_projections[:] = attn_scores.clone()
 
+#%% 
+
+resid_pre_mean = einops.reduce(
+    pre_state, 
+    "b s d_model -> d_model",
+    reduction="mean",
+)
+
 #%%
 
 if DO_QUERYSIDE_PROJECTIONS:
     for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
         model.reset_hooks()
 
-        unnormalized_queries = einops.repeat(
-            pre_state[batch_idx, seq_idx, :],
+        normalized_queries = einops.repeat(
+            normalize(pre_state[batch_idx, seq_idx, :])* np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
         # project each onto the relevant unembedding
-        unnormalized_queries, _ = original_project(
-            unnormalized_queries,
-            model.W_U.T[_DATA_TOKS[batch_idx, 1:seq_idx+1]],
+        normalized_queries, _ = original_project(
+            normalized_queries,
+            list(einops.rearrange(model.W_U.T[top_answers[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
             test=False,
         )
 
         cur_attn_scores = dot_with_query(
             unnormalized_keys = keyside_projections[batch_idx, 1:seq_idx+1, :],
-            unnormalized_queries = unnormalized_queries,
+            unnormalized_queries = normalized_queries,
             model = model,
             layer_idx = 10,
             head_idx = 7,
             use_tqdm = False,
+            normalize_queries = False, 
+            normalize_keys = True,
         )
 
         attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
+
+        if batch_idx>3:
+            warnings.warn("Early")
+            break
+
+#%%
+
+true_attention_pattern = attn_scores.clone().softmax(dim=-1)
+fake_attention_pattern = attention_score_projections.clone().softmax(dim=-1)
+
+#%%
+
+CUTOFF = 30
+BATCH_INDEX = 2 # 2 is great!
+
+for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, fake_attention_pattern], strict=True):
+    imshow(
+        attention_pattern[BATCH_INDEX, :CUTOFF, :CUTOFF],
+        x = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
+        y = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
+        title = name,
+    )
+
+#%%
+
+"""
+Thoughts: BOS being non-zero a lot seems like soemthings' off
+Probably don't use individual tokens as the projection??? Let's take model's most confident predictions?
+"""
 
 #%%
 
