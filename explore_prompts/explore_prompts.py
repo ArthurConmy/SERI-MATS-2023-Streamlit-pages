@@ -300,7 +300,7 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(S
         test = False,
     )
 
-    if seq_idx != 0:
+    if seq_idx != -1:
         keyside_projections[batch_idx, seq_idx] = keyside_vector
         keyside_orthogonals[batch_idx, seq_idx] = keyside_orthogonal
 
