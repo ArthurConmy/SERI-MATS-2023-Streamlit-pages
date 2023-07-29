@@ -190,7 +190,7 @@ MODEL_RESULTS = get_model_results(
     use_cuda=False,
     effective_embedding="W_E (including MLPs)",
 )
-model.to("cuda")
+model=model.to("cuda")
 
 #%%
 
@@ -304,8 +304,8 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(S
         keyside_projections[batch_idx, seq_idx] = keyside_vector
         keyside_orthogonals[batch_idx, seq_idx] = keyside_orthogonal
 
-    else: # BOS seems weird, let's just keep as-is
-        keyside_projections[batch_idx, seq_idx] = keyside_vector + keyside_orthogonal
+    else: # BOS seems weird
+        keyside_projections[batch_idx, seq_idx] = 0.0 # keyside_vector + keyside_orthogonal
         keyside_orthogonals[batch_idx, seq_idx] = 0.0
 
 #%%
@@ -337,13 +337,13 @@ model.add_hook(
 
 #%%
 
-projected_end_state = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("resid_post", 11))[1][get_act_name("resid_post", 11)]
+projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
 
 #%%
 
 projected_loss = get_metric_from_end_state(
     model = model,
-    end_state = projected_end_state,
+    end_state = end_state - head_out + projected_head_output,
     frozen_ln_scale = scale,
     targets = _DATA_TOKS[:, 1:],
 )
@@ -356,7 +356,7 @@ ICS_list.append(ICS)
 # In[ ]:
 
 new_ICS = deepcopy(ICS)
-new_ICS["L_CS"] = projected_loss
+new_ICS["L_CS"] = projected_loss.cpu()
 
 # In[ ]:
 
