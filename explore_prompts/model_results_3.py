@@ -1,5 +1,9 @@
 # This file contains functions to get results from my model. I use them to generate the visualisations found on the Streamlit pages.
 
+"""
+TODO why is this in streamlit and the researchsprint TL branch? This cost me time
+"""
+
 # Make sure explore_prompts is in path (it will be by default in Streamlit)
 import sys, os
 for root_dir in [
@@ -12,6 +16,10 @@ for root_dir in [
     print(root_dir, "is a root dir")
     if os.path.exists(root_dir):
         break
+
+if str(__file__).startswith("/root"):
+    # On a vast machine so Arthur's using this file
+    raise Exception("This file is duplicated, probably shouldn't be using")
 
 os.chdir(root_dir)
 if root_dir not in sys.path: sys.path.append(root_dir)

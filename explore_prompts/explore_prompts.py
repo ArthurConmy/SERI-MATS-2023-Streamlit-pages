@@ -13,36 +13,9 @@ NOTE: this is cribbed from explore_prompts.ipynb, Arthur finds it much easier to
 
 # In[4]:
 
-
-# import torch as t
-# from transformer_lens import HookedTransformer
-
-# model = HookedTransformer.from_pretrained(
-#     "gpt2-small",
-#     center_unembed=True,
-#     center_writing_weights=True,
-#     fold_ln=True,
-#     device="cpu"
-#     # refactor_factored_attn_matrices=True,
-# )
-# model.set_use_split_qkv_input(False)
-# model.set_use_attn_result(True)
-
-# t.save(model.half(), "gpt2-small.pt")
-
 from transformer_lens.cautils.notebook import *
 import gzip
 
-from generate_html import (
-    CSS,
-    generate_4_html_plots,
-    generate_html_for_DLA_plot,
-    generate_html_for_logit_plot,
-    generate_html_for_loss_plot,
-    generate_html_for_unembedding_components_plot,
-    attn_filter,
-    _get_color,
-)
 from transformer_lens.rs.callum2.explore_prompts.model_results_3 import (
     get_model_results,
     HeadResults,
@@ -68,7 +41,7 @@ from transformer_lens.rs.callum2.explore_prompts.copy_suppression_classification
     plot_full_matrix_histogram,
 )
 
-from transformer_lens.rs.arthurs_notebooks.arthur_utils import get_metric_from_end_state
+from transformer_lens.rs.arthurs_notebooks.arthur_utils import get_metric_from_end_state, dot_with_query
 
 clear_output()
 
@@ -122,7 +95,7 @@ model = HookedTransformer.from_pretrained(
     center_unembed=True,
     center_writing_weights=True,
     fold_ln=True,
-    device="cpu" # "cuda"
+    device="cuda"
     # fold value bias?
 )
 model.set_use_split_qkv_input(False)
@@ -144,9 +117,9 @@ W_EE_dict = get_effective_embedding_2(model)
 
 BATCH_SIZE = 20 # Smaller on Arthur's machine
 SEQ_LEN = 100 # 70 for viz (no more, because attn)
-batch_idx = 36
+TESTING = True
 
-NEGATIVE_HEADS = [(10, 7), (11, 10)]
+NEGATIVE_HEADS = [(10, 7)]
 
 def process_webtext(
     seed: int = 6,
@@ -204,17 +177,10 @@ i = 0
 
 #%%
 
-# toks=_DATA_TOKS
-# negative_heads=NEGATIVE_HEADS
-# verbose=True
-# K_semantic=K_semantic
-# K_unembed=K_unembed
-# use_cuda=False
-# effective_embedding="W_E (including MLPs)"
-
+model.to("cpu")
 MODEL_RESULTS = get_model_results(
     model,
-    toks=_DATA_TOKS,
+    toks=_DATA_TOKS.to("cpu"),
     negative_heads=NEGATIVE_HEADS,
     verbose=True,
     K_semantic=K_semantic,
@@ -222,29 +188,50 @@ MODEL_RESULTS = get_model_results(
     use_cuda=False,
     effective_embedding="W_E (including MLPs)",
 )
+model.to("cuda")
 
 #%%
 
 # The goal is to make a BATCH_SIZE x SEQ_LEN-1 list of losses here 
 
 # Let's decompose the goal
-# 1. Firstly reproduce that mean ablating the direct effect of 10.7 gives points that are exclusively on the y=x line
-# 2. Use your get_metric_from_end_state methinks : ) 
+# 1. Firstly reproduce that mean ablating the direct effect of 10.7 gives points that are exclusively on the y=x line DONE
+# 2. Use your get_metric_from_end_state methinks : ) DONE
 # 3. Let the experiments begin
+
+"""
+
+Brainstorm of some ideas for how to QK approximations
+
+1) Set query to the unembedding component, only?
+2) [While doing ??? with BOS? Making its attention score such that the attention is the same?]
+
+Okay we're trading off simplicity of implementation vs something that could actually work
+
+Callum's implementation has too many side conditions, let's do some hacky things fast and look at failures
+""" 
 
 #%%
 
 model.reset_hooks()
 final_ln_scale_hook_name = "ln_final.hook_scale"
+resid_pre_name = get_act_name("resid_pre", 10)
+post_mlp_0 = get_act_name("resid_post", 0)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
-    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name],
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, post_mlp_0] + ([get_act_name("attn_scores", 10)] if TESTING else []),
 )
 
+pre_state = cache[get_act_name("resid_pre", 10)]
 end_state = cache[get_act_name("resid_post", 11)]
 head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
+resid_pre1 = cache[post_mlp_0]
+
+if TESTING:
+    attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
+
 del cache
 gc.collect()
 t.cuda.empty_cache()
@@ -265,6 +252,98 @@ head_loss = get_metric_from_end_state(
     frozen_ln_scale = scale,
     targets = _DATA_TOKS[:, 1:],
 )
+
+#%%
+
+# Compute the output of Head 10.7 manually?
+
+if TESTING: # This is actually fairly slow, a bit of a problem for the 
+    manual_head_output = t.zeros(BATCH_SIZE, SEQ_LEN, model.cfg.d_model).cuda()
+    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):    
+        model.reset_hooks()
+        current_attention_scores = dot_with_query(
+            unnormalized_keys = pre_state[batch_idx, :seq_idx+1, :],
+            unnormalized_queries = einops.repeat(
+                pre_state[batch_idx, seq_idx, :],
+                "d_model -> seq_len d_model",
+                seq_len = seq_idx+1,
+            ),
+            model = model,
+            layer_idx = 10,
+            head_idx = 7,
+            use_tqdm = False,
+        )
+        t.testing.assert_close(
+            current_attention_scores,
+            attn_scores[batch_idx, seq_idx, :seq_idx+1],
+            atol=5e-3,
+            rtol=5e-3,
+        ), f"batch_idx={batch_idx}, seq_idx={seq_idx} failure"
+
+#%%
+
+# Cribbed from `venn_diagrams_loss_recovered.py`
+
+for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN)))):
+    
+    project_onto = None
+    project_onto = cache[get_act_name("resid_pre", 1)][batch_idx, seq_idx]
+
+    keyside_vector, keyside_orthogonal = project(
+        normalize(cache[get_act_name("resid_pre", NEGATIVE_LAYER_IDX)][batch_idx, seq_idx]) * np.sqrt(model.cfg.d_model), # simulate LN
+        project_onto,
+    )
+
+    if seq_idx != 0:
+        keyside_projections[batch_idx, seq_idx] = keyside_vector
+        keyside_orthogonals[batch_idx, seq_idx] = keyside_orthogonal
+
+    else: # BOS seems weird, let's just keep as-is
+        keyside_projections[batch_idx, seq_idx] = keyside_vector + keyside_orthogonal
+        keyside_orthogonals[batch_idx, seq_idx] = 0.0
+
+#%%
+
+# We might not actually use some queryside approximation, but let's compute it anyway
+queryside_vectors = t.zeros((BATCH_SIZE, model.cfg.d_model)).cuda()
+
+# Just do this part for the individual queries that we need
+for batch_batch_idx, (batch_idx, seq_idx) in enumerate(list(zip(top5p_batch_indices, 
+top5p_seq_indices))):
+
+    queryside_vector, queryside_orthogonal = project(
+        cache[get_act_name("resid_pre", NEGATIVE_LAYER_IDX)][batch_idx, seq_idx],
+        dir=[model.W_U.T[batched_tokens[batch_idx, earlier_seq_idx]] for earlier_seq_idx in range(seq_idx+1)],
+    )
+    queryside_vectors[batch_batch_idx] = queryside_vector
+
+#%%
+
+# If this is greater than 0, try to "random ablate" the orthogonal direction
+RAND_ORTHOGONAL_COEFFICIENT = 0.0 
+
+np.random.seed(433)
+for batch_batch_idx, batch_idx in enumerate(top5p_batch_indices):
+    rand_batch_indices = [np.random.randint(0, BATCH_SIZE) for _ in range(MAX_SEQ_LEN)]
+    rand_seq_indices = [np.random.randint(0, MAX_SEQ_LEN) for _ in range(MAX_SEQ_LEN)]
+
+    keyside_projections[batch_batch_idx] = torch.stack([
+        keyside_projections[batch_idx, seq_idx] + RAND_ORTHOGONAL_COEFFICIENT*keyside_orthogonals[rand_batch_idx, rand_seq_idx] for seq_idx, rand_batch_idx, rand_seq_idx in zip(range(MAX_SEQ_LEN), rand_batch_indices, rand_seq_indices, strict=True)
+    ])
+
+#%%
+
+model.set_use_split_qkv_input(True)
+model.set_use_split_qkv_normalized_input(True)
+model.reset_hooks()
+
+# # Add the hook approximation
+model.add_hook(
+    get_act_name("k_normalized_input", NEGATIVE_LAYER_IDX),
+    partial(set_to_value, head_idx=NEGATIVE_HEAD_IDX, new_value=keyside_projections.cuda()),
+    level=1,
+)
+
 
 #%%
 
