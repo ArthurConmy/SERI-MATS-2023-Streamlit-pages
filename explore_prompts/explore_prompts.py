@@ -67,8 +67,10 @@ from transformer_lens.rs.callum2.explore_prompts.copy_suppression_classification
     plot_logit_lens,
     plot_full_matrix_histogram,
 )
-clear_output()
 
+from transformer_lens.rs.arthurs_notebooks.arthur_utils import get_metric_from_end_state
+
+clear_output()
 
 # In[5]:
 
@@ -186,11 +188,6 @@ MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
 MINIBATCH_DATA_TOKS = [DATA_TOKS[i*MINIBATCH_SIZE:(i+1)*MINIBATCH_SIZE] for i in range(NUM_MINIBATCHES)]
 MINIBATCH_DATA_STR_TOKS_PARSED = [DATA_STR_TOKS_PARSED[i*MINIBATCH_SIZE:(i+1)*MINIBATCH_SIZE] for i in range(NUM_MINIBATCHES)]
 
-# DATA_STR_TOKS_PARSED_2 = DATA_STR_TOKS_PARSED[MINIBATCH_SIZE:2*MINIBATCH_SIZE]
-# DATA_STR_TOKS_PARSED_3 = DATA_STR_TOKS_PARSED[2*MINIBATCH_SIZE:]
-# DATA_TOKS_MINI = DATA_TOKS[[32, 36], :60]
-# DATA_STR_TOKS_PARSED_MINI = [DATA_STR_TOKS_PARSED[32][:60], DATA_STR_TOKS_PARSED[36][:60]]
-
 # In[13]:
 
 K_semantic = 5
@@ -199,76 +196,95 @@ K_unembed = 10
 ICS_list = []
 HTML_list = []
 
-for i, (_DATA_TOKS, DATA_STR_TOKS_PARSED) in list(enumerate(zip(
-    MINIBATCH_DATA_TOKS,
-    MINIBATCH_DATA_STR_TOKS_PARSED,
-))):
-    print(f"Minibatch {i} of {NUM_MINIBATCHES}")
+assert NUM_MINIBATCHES == 1, "Deprecating support for several minibatches"
 
-    MODEL_RESULTS = get_model_results(
-        model,
-        toks=_DATA_TOKS,
-        negative_heads=NEGATIVE_HEADS,
-        verbose=True,
-        K_semantic=K_semantic,
-        K_unembed=K_unembed,
-        use_cuda=False,
-        effective_embedding="W_E (including MLPs)",
-    )
+_DATA_TOKS = MINIBATCH_DATA_TOKS[0]
+DATA_STR_TOKS_PARSED= MINIBATCH_DATA_STR_TOKS_PARSED[0]
+i = 0
 
+#%%
 
-    ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
-    ICS_list.append(ICS)
+# toks=_DATA_TOKS
+# negative_heads=NEGATIVE_HEADS
+# verbose=True
+# K_semantic=K_semantic
+# K_unembed=K_unembed
+# use_cuda=False
+# effective_embedding="W_E (including MLPs)"
 
-    HTML_PLOTS = generate_4_html_plots(
-        model,
-        _DATA_TOKS,
-        DATA_STR_TOKS_PARSED,
-        NEGATIVE_HEADS,
-        save_files = False,
-        model_results = MODEL_RESULTS,
-        # restrict_computation = ["UNEMBEDDINGS"]
-    )
-    HTML_list.append(HTML_PLOTS)
+MODEL_RESULTS = get_model_results(
+    model,
+    toks=_DATA_TOKS,
+    negative_heads=NEGATIVE_HEADS,
+    verbose=True,
+    K_semantic=K_semantic,
+    K_unembed=K_unembed,
+    use_cuda=False,
+    effective_embedding="W_E (including MLPs)",
+)
 
-    # use os.path.expanduser so this works on any machine where TL is cloned in the home directory
-    _ST_HTML_PATH = Path(os.path.expanduser('~/TransformerLens/transformer_lens/rs/callum2/explore_prompts/media/'))
+#%%
 
-    with open(_ST_HTML_PATH / f"ICS_{i}.pkl", "wb") as f:
-        pickle.dump(ICS, f)
+# The goal is to make a BATCH_SIZE x SEQ_LEN-1 list of losses here 
 
-    with gzip.open(_ST_HTML_PATH / f"GZIP_HTML_PLOTS_{i}.pkl", "wb") as f:
-        pickle.dump(HTML_PLOTS, f)
+# Let's decompose the goal
+# 1. Firstly reproduce that mean ablating the direct effect of 10.7 gives points that are exclusively on the y=x line
+# 2. Use your get_metric_from_end_state methinks : ) 
+# 3. Let the experiments begin
+
+#%%
+
+model.reset_hooks()
+final_ln_scale_hook_name = "ln_final.hook_scale"
+
+logits, cache = model.run_with_cache(
+    _DATA_TOKS[:, :-1],
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name],
+)
+
+end_state = cache[get_act_name("resid_post", 11)]
+head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
+scale = cache[final_ln_scale_hook_name]
+del cache
+gc.collect()
+t.cuda.empty_cache()
+
+#%%
+
+mean_head_output = einops.reduce(
+    head_out,
+    "b s d_head -> d_head",
+    reduction="mean",
+)
+
+#%%
+
+head_loss = get_metric_from_end_state(
+    model = model,
+    end_state = end_state - head_out + mean_head_output.unsqueeze(0).unsqueeze(0).clone(),
+    frozen_ln_scale = scale,
+    targets = _DATA_TOKS[:, 1:],
+)
+
+#%%
+
+ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
+ICS_list.append(ICS)
 
 # In[ ]:
 
-
-ICS_list = [pickle.load(open(_ST_HTML_PATH / f"ICS_{i}.pkl", "rb")) for i in range(NUM_MINIBATCHES)]
-ICS = {k: t.concat([ICS_list[i][k] for i in range(NUM_MINIBATCHES)], dim=0) for k in ICS_list[0].keys()}
-with open(_ST_HTML_PATH / f"ICS.pkl", "wb") as f:
-    pickle.dump(ICS, f)
-
-
-HTML_list: List[dict] = [pickle.load(gzip.open(_ST_HTML_PATH / f"GZIP_HTML_PLOTS_{i}.pkl", "rb")) for i in range(NUM_MINIBATCHES)]
-HTML = HTML_list[0]
-for html in HTML_list[1:]:
-    first_batch_idx = len(HTML["LOGITS_ORIG"])
-    for k, v in html.items():
-        for (batch_idx, *other_args), html_str in v.items():
-            HTML[k][(first_batch_idx + batch_idx, *other_args)] = html_str
-with gzip.open(_ST_HTML_PATH / f"GZIPPED_HTML_PLOTS.pkl", "wb") as f:
-    pickle.dump(HTML, f)
-
+new_ICS = deepcopy(ICS)
+new_ICS["L_CS"] = head_loss
 
 # In[ ]:
-
-
-
 
 scatter, results, df = generate_scatter(
-    ICS=ICS,
+    ICS=new_ICS,
     DATA_STR_TOKS_PARSED=list(itertools.chain(*MINIBATCH_DATA_STR_TOKS_PARSED)),
 )
+
+#%%
+
 hist1 = generate_hist(ICS, threshold=0.05)
 hist2 = generate_hist(ICS, threshold=0.025)
 
