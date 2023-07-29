@@ -7,6 +7,7 @@ for root_dir in [
     "/app/seri-mats-2023-streamlit-pages/explore_prompts", # For Streamlit page (public)
     os.getcwd().split("SERI-MATS-2023-Streamlit-pages")[0] + "SERI-MATS-2023-Streamlit-pages/explore_prompts", # For Arthur's branch
     os.getcwd().split("seri-mats-2023-streamlit-pages")[0] + "seri-mats-2023-streamlit-pages/explore_prompts", # For Arthur's branch
+    os.getcwd().split("SERI-MATS-2023-Streamlit-pages")[0] + "SERI-MATS-2023-Streamlit-pages/explore_prompts", # For Arthur's branch
 ]:
     print(root_dir, "is a root dir")
     if os.path.exists(root_dir):
