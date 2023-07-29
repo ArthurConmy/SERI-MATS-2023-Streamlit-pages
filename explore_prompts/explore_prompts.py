@@ -41,7 +41,9 @@ from transformer_lens.rs.callum2.explore_prompts.copy_suppression_classification
     plot_full_matrix_histogram,
 )
 
-from transformer_lens.rs.arthurs_notebooks.arthur_utils import get_metric_from_end_state, dot_with_query
+from transformer_lens.rs.arthurs_notebooks.arthur_utils import get_metric_from_end_state, dot_with_query, set_to_value
+
+from transformer_lens.rs.callum2.keys_fixed import project as original_project
 
 clear_output()
 
@@ -117,7 +119,7 @@ W_EE_dict = get_effective_embedding_2(model)
 
 BATCH_SIZE = 20 # Smaller on Arthur's machine
 SEQ_LEN = 100 # 70 for viz (no more, because attn)
-TESTING = True
+TESTING = False
 
 NEGATIVE_HEADS = [(10, 7)]
 
@@ -284,14 +286,18 @@ if TESTING: # This is actually fairly slow, a bit of a problem for the
 
 # Cribbed from `venn_diagrams_loss_recovered.py`
 
-for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN)))):
+keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
+keyside_orthogonals = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
+
+for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):
     
     project_onto = None
-    project_onto = cache[get_act_name("resid_pre", 1)][batch_idx, seq_idx]
+    project_onto = resid_pre1[batch_idx, seq_idx]
 
-    keyside_vector, keyside_orthogonal = project(
-        normalize(cache[get_act_name("resid_pre", NEGATIVE_LAYER_IDX)][batch_idx, seq_idx]) * np.sqrt(model.cfg.d_model), # simulate LN
+    keyside_vector, keyside_orthogonal = original_project(
+        normalize(pre_state[batch_idx, seq_idx]) * np.sqrt(model.cfg.d_model), # simulate LN
         project_onto,
+        test = False,
     )
 
     if seq_idx != 0:
@@ -304,32 +310,17 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(S
 
 #%%
 
-# We might not actually use some queryside approximation, but let's compute it anyway
-queryside_vectors = t.zeros((BATCH_SIZE, model.cfg.d_model)).cuda()
+# # If this is greater than 0, try to "random ablate" the orthogonal direction
+# RAND_ORTHOGONAL_COEFFICIENT = 0.0 
 
-# Just do this part for the individual queries that we need
-for batch_batch_idx, (batch_idx, seq_idx) in enumerate(list(zip(top5p_batch_indices, 
-top5p_seq_indices))):
+# np.random.seed(433)
+# for batch_batch_idx, batch_idx in enumerate(top5p_batch_indices):
+#     rand_batch_indices = [np.random.randint(0, BATCH_SIZE) for _ in range(MAX_SEQ_LEN)]
+#     rand_seq_indices = [np.random.randint(0, MAX_SEQ_LEN) for _ in range(MAX_SEQ_LEN)]
 
-    queryside_vector, queryside_orthogonal = project(
-        cache[get_act_name("resid_pre", NEGATIVE_LAYER_IDX)][batch_idx, seq_idx],
-        dir=[model.W_U.T[batched_tokens[batch_idx, earlier_seq_idx]] for earlier_seq_idx in range(seq_idx+1)],
-    )
-    queryside_vectors[batch_batch_idx] = queryside_vector
-
-#%%
-
-# If this is greater than 0, try to "random ablate" the orthogonal direction
-RAND_ORTHOGONAL_COEFFICIENT = 0.0 
-
-np.random.seed(433)
-for batch_batch_idx, batch_idx in enumerate(top5p_batch_indices):
-    rand_batch_indices = [np.random.randint(0, BATCH_SIZE) for _ in range(MAX_SEQ_LEN)]
-    rand_seq_indices = [np.random.randint(0, MAX_SEQ_LEN) for _ in range(MAX_SEQ_LEN)]
-
-    keyside_projections[batch_batch_idx] = torch.stack([
-        keyside_projections[batch_idx, seq_idx] + RAND_ORTHOGONAL_COEFFICIENT*keyside_orthogonals[rand_batch_idx, rand_seq_idx] for seq_idx, rand_batch_idx, rand_seq_idx in zip(range(MAX_SEQ_LEN), rand_batch_indices, rand_seq_indices, strict=True)
-    ])
+#     keyside_projections[batch_batch_idx] = torch.stack([
+#         keyside_projections[batch_idx, seq_idx] + RAND_ORTHOGONAL_COEFFICIENT*keyside_orthogonals[rand_batch_idx, rand_seq_idx] for seq_idx, rand_batch_idx, rand_seq_idx in zip(range(MAX_SEQ_LEN), rand_batch_indices, rand_seq_indices, strict=True)
+#     ])
 
 #%%
 
@@ -339,11 +330,23 @@ model.reset_hooks()
 
 # # Add the hook approximation
 model.add_hook(
-    get_act_name("k_normalized_input", NEGATIVE_LAYER_IDX),
-    partial(set_to_value, head_idx=NEGATIVE_HEAD_IDX, new_value=keyside_projections.cuda()),
+    get_act_name("k_normalized_input", 10),
+    partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
     level=1,
 )
 
+#%%
+
+projected_end_state = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("resid_post", 11))[1][get_act_name("resid_post", 11)]
+
+#%%
+
+projected_loss = get_metric_from_end_state(
+    model = model,
+    end_state = projected_end_state,
+    frozen_ln_scale = scale,
+    targets = _DATA_TOKS[:, 1:],
+)
 
 #%%
 
@@ -353,7 +356,7 @@ ICS_list.append(ICS)
 # In[ ]:
 
 new_ICS = deepcopy(ICS)
-new_ICS["L_CS"] = head_loss
+new_ICS["L_CS"] = projected_loss
 
 # In[ ]:
 
