@@ -218,7 +218,7 @@ Callum's implementation has too many side conditions, let's do some hacky things
 model.reset_hooks()
 final_ln_scale_hook_name = "ln_final.hook_scale"
 resid_pre_name = get_act_name("resid_pre", 10)
-resid_pre1_name = get_act_name("resid_pre", 10)
+resid_pre1_name = get_act_name("resid_pre", 5)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
