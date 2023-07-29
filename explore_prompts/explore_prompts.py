@@ -284,6 +284,23 @@ if TESTING: # This is actually fairly slow, a bit of a problem for the
 
 #%%
 
+my_random_tokens = model.to_tokens("Here are some random words:" + " Reboot| Telegram| deregulation| 7000| asses| IPM|bats| scoreboard| shrouded| volleyball|acan|earcher| buttocks|adies| Giovanni| Jesuit| Sheen|reverse|ruits|".replace("|", ""))[0]
+
+my_embeddings = t.zeros(BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model).cuda()
+
+for batch_idx in range(BATCH_SIZE):
+    current_prompt = t.cat([
+        einops.repeat(my_random_tokens, "random_seq_len -> cur_seq_len random_seq_len", cur_seq_len=SEQ_LEN-1).clone(),
+        _DATA_TOKS[batch_idx, :-1].unsqueeze(-1).clone(),
+    ],dim=1)
+    current_embeddings = model.run_with_cache(
+        current_prompt,
+        names_filter = lambda name: name==get_act_name("resid_pre", 10),
+    )[1][get_act_name("resid_pre", 10)][torch.arange(SEQ_LEN-1), -1]
+    my_embeddings[batch_idx] = current_embeddings
+
+#%%
+
 # Cribbed from `venn_diagrams_loss_recovered.py`
 
 keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
@@ -292,7 +309,7 @@ keyside_orthogonals = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(mod
 for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):
     
     project_onto = None
-    project_onto = resid_pre1[batch_idx, seq_idx]
+    project_onto = my_embeddings[batch_idx, seq_idx]
 
     keyside_vector, keyside_orthogonal = original_project(
         normalize(pre_state[batch_idx, seq_idx]) * np.sqrt(model.cfg.d_model), # simulate LN
@@ -300,12 +317,12 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(S
         test = False,
     )
 
-    if seq_idx != -1:
+    if seq_idx != 0:
         keyside_projections[batch_idx, seq_idx] = keyside_vector
         keyside_orthogonals[batch_idx, seq_idx] = keyside_orthogonal
 
     else: # BOS seems weird
-        keyside_projections[batch_idx, seq_idx] = 0.0 # keyside_vector + keyside_orthogonal
+        keyside_projections[batch_idx, seq_idx] = keyside_vector + keyside_orthogonal
         keyside_orthogonals[batch_idx, seq_idx] = 0.0
 
 #%%
@@ -398,8 +415,8 @@ sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
 # %%
 
 px.bar(
-    x = model.to_str_tokens(sorted_indices[:10].cpu().numpy()),
-    y = sorted_probs[:10].cpu().numpy().tolist(),
+    x = model.to_str_tokens(sorted_indices[500:510].cpu().numpy()),
+    y = sorted_probs[500:510].cpu().numpy().tolist(),
 ).show()
 
 # %%
