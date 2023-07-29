@@ -336,25 +336,28 @@ else:
 #%%
 
 attention_score_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, SEQ_LEN-1)).to(model.cfg.device)
+attention_score_projections[:] = attn_scores.clone()
+
+#%%
 
 if DO_QUERYSIDE_PROJECTIONS:
-    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):    
+    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
         model.reset_hooks()
 
         unnormalized_queries = einops.repeat(
             pre_state[batch_idx, seq_idx, :],
             "d_model -> seq_len d_model",
-            seq_len = seq_idx+1,
+            seq_len = seq_idx,
         )
         # project each onto the relevant unembedding
         unnormalized_queries, _ = original_project(
             unnormalized_queries,
-            model.W_U.T[_DATA_TOKS[batch_idx, :seq_idx+1]],
+            model.W_U.T[_DATA_TOKS[batch_idx, 1:seq_idx+1]],
             test=False,
         )
 
-        current_attention_scores = dot_with_query(
-            unnormalized_keys = keyside_projections[batch_idx, :seq_idx+1, :],
+        cur_attn_scores = dot_with_query(
+            unnormalized_keys = keyside_projections[batch_idx, 1:seq_idx+1, :],
             unnormalized_queries = unnormalized_queries,
             model = model,
             layer_idx = 10,
@@ -362,8 +365,7 @@ if DO_QUERYSIDE_PROJECTIONS:
             use_tqdm = False,
         )
 
-else:
-    attention_score_projections[:] = current_attention_scores.clone()
+        attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
 
 #%%
 
@@ -391,6 +393,7 @@ if DO_QUERYSIDE_PROJECTIONS:
     model.add_hook(
         get_act_name("attn_scores", 10),
         partial(set_to_value, head_idx=7, new_value=attention_score_projections.cuda()),
+        level=1,
     )
 
 elif DO_KEYSIDE_PROJECTIONS:
