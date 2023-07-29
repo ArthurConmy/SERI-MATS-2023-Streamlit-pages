@@ -106,6 +106,7 @@ model.set_use_attn_result(True)
 clear_output()
 
 
+
 # In[7]:
 
 
@@ -178,7 +179,6 @@ assert NUM_MINIBATCHES == 1, "Deprecating support for several minibatches"
 _DATA_TOKS = MINIBATCH_DATA_TOKS[0]
 DATA_STR_TOKS_PARSED= MINIBATCH_DATA_STR_TOKS_PARSED[0]
 i = 0
-
 #%%
 
 model.to("cpu")
@@ -191,8 +191,17 @@ MODEL_RESULTS = get_model_results(
     K_unembed=K_unembed,
     use_cuda=False,
     effective_embedding="W_E (including MLPs)",
+    include_qk = True,
 )
 model=model.to("cuda")
+
+#%%
+
+logits_for_E_sq_QK = MODEL_RESULTS.misc["logits_for_E_sq"] # this has the future stuff screened off
+E_sq_QK: Float[torch.Tensor, "batch seq_len K"] = MODEL_RESULTS.E_sq_QK[10, 7]
+
+_logits_for_E_sq = MODEL_RESULTS.misc["logits_for_E_sq"] 
+_E_sq = MODEL_RESULTS.E_sq[10, 7]
 
 #%%
 
@@ -209,12 +218,16 @@ Brainstorm of some ideas for how to QK approximations
 
 1) Set query to the unembedding component, only?
 2) [While doing ??? with BOS? Making its attention score such that the attention is the same?]
-
 Okay we're trading off simplicity of implementation vs something that could actually work
-
 Callum's implementation has too many side conditions, let's do some hacky things fast and look at failures
-""" 
 
+Okay so the implementation with various topk things is really bad
+Let's do 
+i) Do Callum's embedding idea
+ii) Choose versions of these that are predicted maximally 
+iii) Project onto these unembeddings
+(still leaves possibility that some orthogonal matters more)
+""" 
 #%%
 
 model.reset_hooks()
@@ -272,7 +285,6 @@ head_loss = get_metric_from_end_state(
     frozen_ln_scale = scale,
     targets = _DATA_TOKS[:, 1:],
 )
-
 #%%
 
 # Compute the output of Head 10.7 manually?
@@ -378,7 +390,7 @@ if DO_QUERYSIDE_PROJECTIONS:
         # project each onto the relevant unembedding
         normalized_queries, _ = original_project(
             normalized_queries,
-            list(einops.rearrange(model.W_U.T[top_answers[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
+            list(einops.rearrange(model.W_U.T[E_sq_QK[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
             test=False,
         )
 
@@ -389,7 +401,7 @@ if DO_QUERYSIDE_PROJECTIONS:
             layer_idx = 10,
             head_idx = 7,
             use_tqdm = False,
-            normalize_queries = True, 
+            normalize_queries = False, 
             normalize_keys = True,
             add_query_bias = True, 
             add_key_bias = True,
@@ -411,7 +423,7 @@ fake_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still h
 
 #%%
 
-CUTOFF = 30
+CUTOFF = 50
 BATCH_INDEX = 2 # 2 is great!
 
 for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, fake_attention_pattern], strict=True):
