@@ -285,6 +285,7 @@ if TESTING: # This is actually fairly slow, a bit of a problem for the
 #%%
 
 my_random_tokens = model.to_tokens("Here are some random words:" + " Reboot| Telegram| deregulation| 7000| asses| IPM|bats| scoreboard| shrouded| volleyball|acan|earcher| buttocks|adies| Giovanni| Jesuit| Sheen|reverse|ruits|".replace("|", ""))[0]
+my_random_tokens = model.to_tokens("The")[0]
 
 my_embeddings = t.zeros(BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model).cuda()
 
@@ -398,7 +399,8 @@ with gzip.open(_ST_HTML_PATH / f"CS_CLASSIFICATION.pkl", "wb") as f:
 #%%
 
 my_prompts = [
-    "Here are some random words:" + " 7000| Reboot| Telegram| deregulation| asses| IPM|bats| scoreboard| shrouded| volleyball|acan|earcher| buttocks|adies| Giovanni| Jesuit| Sheen|reverse|ruits|".replace("|", "")
+    # "Here are some random words:" + " 7000| Reboot| Telegram| deregulation| asses| IPM|bats| scoreboard| shrouded| volleyball|acan|earcher| buttocks|adies| Giovanni| Jesuit| Sheen|reverse|ruits|".replace("|", "")
+    "The", # oh wow this does a lot better than the 
 ]
 
 model.reset_hooks()
