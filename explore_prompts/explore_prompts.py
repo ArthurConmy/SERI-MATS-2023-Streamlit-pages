@@ -218,18 +218,18 @@ Callum's implementation has too many side conditions, let's do some hacky things
 model.reset_hooks()
 final_ln_scale_hook_name = "ln_final.hook_scale"
 resid_pre_name = get_act_name("resid_pre", 10)
-post_mlp_0 = get_act_name("resid_post", 0)
+resid_pre1_name = get_act_name("resid_pre", 10)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
-    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, post_mlp_0] + ([get_act_name("attn_scores", 10)] if TESTING else []),
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name] + ([get_act_name("attn_scores", 10)] if TESTING else []),
 )
 
 pre_state = cache[get_act_name("resid_pre", 10)]
 end_state = cache[get_act_name("resid_post", 11)]
 head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
-resid_pre1 = cache[post_mlp_0]
+resid_pre1 = cache[resid_pre1_name]
 
 if TESTING:
     attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
