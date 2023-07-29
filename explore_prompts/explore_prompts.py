@@ -379,3 +379,27 @@ with gzip.open(_ST_HTML_PATH / f"CS_CLASSIFICATION.pkl", "wb") as f:
 (df["y"].abs() > 0.5).sum(), (df["x"].abs() > 0.5).sum()
 
 #%%
+
+my_prompts = [
+    "Here are some random words:" + " 7000| Reboot| Telegram| deregulation| asses| IPM|bats| scoreboard| shrouded| volleyball|acan|earcher| buttocks|adies| Giovanni| Jesuit| Sheen|reverse|ruits|".replace("|", "")
+]
+
+model.reset_hooks()
+logits = model(my_prompts)[0]    
+
+# %%
+
+probs = logits[-1].softmax(dim=-1)
+
+# %%
+
+sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
+
+# %%
+
+px.bar(
+    x = model.to_str_tokens(sorted_indices[:10].cpu().numpy()),
+    y = sorted_probs[:10].cpu().numpy().tolist(),
+).show()
+
+# %%
