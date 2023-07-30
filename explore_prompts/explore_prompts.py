@@ -161,6 +161,7 @@ BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 NUM_MINIBATCHES = 1 # previouly 3
 DO_KEYSIDE_PROJECTIONS = False
 DO_QUERYSIDE_PROJECTIONS = True
+PROJECT_MODE: Literal["unembeddings", "name_movers"] = "name_movers" # name_movers is Neel's idea
 
 MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
 MINIBATCH_DATA_TOKS = [DATA_TOKS[i*MINIBATCH_SIZE:(i+1)*MINIBATCH_SIZE] for i in range(NUM_MINIBATCHES)]
@@ -240,7 +241,7 @@ resid_pre1_name = get_act_name("resid_pre", 5)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
-    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name, get_act_name("attn_scores", 10)],
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("result", 9), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name, get_act_name("attn_scores", 10)],
 )
 
 pre_state = cache[get_act_name("resid_pre", 10)]
@@ -248,6 +249,8 @@ end_state = cache[get_act_name("resid_post", 11)]
 head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
 resid_pre1 = cache[resid_pre1_name]
+layer_nine_outs = cache[get_act_name("result", 10)]
+layer_nine_name_movers = [0, 6, 7, 9] # unsure if we'll use these...
 
 attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
 
@@ -287,6 +290,7 @@ head_loss = get_metric_from_end_state(
     frozen_ln_scale = scale,
     targets = _DATA_TOKS[:, 1:],
 )
+
 #%%
 
 # Compute the output of Head 10.7 manually?
@@ -388,16 +392,27 @@ if DO_QUERYSIDE_PROJECTIONS:
         warnings.warn("We're using 2* lol")
 
         normalized_queries = einops.repeat(
-            2*normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+            2 * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
-        # project each onto the relevant unembedding
-        normalized_queries, _ = original_project(
-            normalized_queries,
-            list(einops.rearrange(model.W_U.T[E_sq_QK[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
-            test=False,
-        )
+
+        if PROJECT_MODE == "unembeddings":
+            # project each onto the relevant unembedding
+            normalized_queries, _ = original_project(
+                normalized_queries,
+                list(einops.rearrange(model.W_U.T[E_sq_QK[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
+                test=False,
+            )
+        elif PROJECT_MODE == "name_movers":
+            normalized_queries, _ = original_project(
+                normalized_queries,
+                list(einops.repeat(layer_nine_outs[batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads
+                test=False,
+            )
+
+        else:
+            raise ValueError(f"Unknown project mode {PROJECT_MODE}")
 
         cur_attn_scores = dot_with_query(
             unnormalized_keys = keyside_projections[batch_idx, 1:seq_idx+1, :],
@@ -439,34 +454,11 @@ for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_sco
         x = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
         y = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
         title = name,
-        zmin = -1, 
-        zmax = 1,
+        zmin = -10, 
+        zmax = 10,
     )
 
 #%%
-
-"""
-Thoughts: BOS being non-zero a lot seems like soemthings' off
-Probably don't use individual tokens as the projection??? Let's take model's most confident predictions?
-"""
-
-#%%
-
-# # If this is greater than 0, try to "random ablate" the orthogonal direction
-# RAND_ORTHOGONAL_COEFFICIENT = 0.0 
-
-# np.random.seed(433)
-# for batch_batch_idx, batch_idx in enumerate(top5p_batch_indices):
-#     rand_batch_indices = [np.random.randint(0, BATCH_SIZE) for _ in range(MAX_SEQ_LEN)]
-#     rand_seq_indices = [np.random.randint(0, MAX_SEQ_LEN) for _ in range(MAX_SEQ_LEN)]
-
-#     keyside_projections[batch_batch_idx] = torch.stack([
-#         keyside_projections[batch_idx, seq_idx] + RAND_ORTHOGONAL_COEFFICIENT*keyside_orthogonals[rand_batch_idx, rand_seq_idx] for seq_idx, rand_batch_idx, rand_seq_idx in zip(range(MAX_SEQ_LEN), rand_batch_indices, rand_seq_indices, strict=True)
-#     ])
-
-
-#%%
-
 
 model.set_use_split_qkv_input(True)
 model.set_use_split_qkv_normalized_input(True)
@@ -488,14 +480,8 @@ elif DO_KEYSIDE_PROJECTIONS:
         level=1,
     )
 
-
-#%%
-
 projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
 model.reset_hooks()
-
-
-#%%
 
 projected_loss = get_metric_from_end_state(
     model = model,
@@ -504,22 +490,10 @@ projected_loss = get_metric_from_end_state(
     targets = _DATA_TOKS[:, 1:],
 )
 
-
-#%%
-
 ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
 ICS_list.append(ICS)
-
-
-
-# In[ ]:
-
 new_ICS = deepcopy(ICS)
 new_ICS["L_CS"] = projected_loss.cpu()
-
-
-
-# In[ ]:
 
 scatter, results, df = generate_scatter(
     ICS=new_ICS,
@@ -527,41 +501,3 @@ scatter, results, df = generate_scatter(
 )
 
 #%%
-
-hist1 = generate_hist(ICS, threshold=0.05)
-hist2 = generate_hist(ICS, threshold=0.025)
-
-with gzip.open(_ST_HTML_PATH / f"CS_CLASSIFICATION.pkl", "wb") as f:
-    pickle.dump({"hist1": hist1, "hist2": hist2, "scatter": scatter}, f)
-
-
-# In[ ]:
-
-(df["y"].abs() > 0.5).sum(), (df["x"].abs() > 0.5).sum()
-
-#%%
-
-my_prompts = [
-    # "Here are some random words:" + " 7000| Reboot| Telegram| deregulation| asses| IPM|bats| scoreboard| shrouded| volleyball|acan|earcher| buttocks|adies| Giovanni| Jesuit| Sheen|reverse|ruits|".replace("|", "")
-    "The", # oh wow this does a lot better than the 
-]
-
-model.reset_hooks()
-logits = model(my_prompts)[0]    
-
-# %%
-
-probs = logits[-1].softmax(dim=-1)
-
-# %%
-
-sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
-
-# %%
-
-px.bar(
-    x = model.to_str_tokens(sorted_indices[500:510].cpu().numpy()),
-    y = sorted_probs[500:510].cpu().numpy().tolist(),
-).show()
-
-# %%
