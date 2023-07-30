@@ -168,7 +168,7 @@ MINIBATCH_DATA_STR_TOKS_PARSED = [DATA_STR_TOKS_PARSED[i*MINIBATCH_SIZE:(i+1)*MI
 
 # In[13]:
 
-K_semantic = 5
+K_semantic = 10
 K_unembed = 10
 
 ICS_list = []
@@ -495,6 +495,7 @@ projected_loss = get_metric_from_end_state(
     targets = _DATA_TOKS[:, 1:],
 )
 
+
 #%%
 
 ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
@@ -505,12 +506,16 @@ ICS_list.append(ICS)
 new_ICS = deepcopy(ICS)
 new_ICS["L_CS"] = projected_loss.cpu()
 
+
+
 # In[ ]:
 
 scatter, results, df = generate_scatter(
     ICS=new_ICS,
     DATA_STR_TOKS_PARSED=list(itertools.chain(*MINIBATCH_DATA_STR_TOKS_PARSED)),
 )
+
+
 
 #%%
 
