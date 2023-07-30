@@ -159,7 +159,7 @@ DATA_TOKS, DATA_STR_TOKS_PARSED = process_webtext(verbose=True) # indices=list(r
 BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 
 NUM_MINIBATCHES = 1 # previouly 3
-DO_KEYSIDE_PROJECTIONS = False
+DO_KEYSIDE_PROJECTIONS = True
 DO_QUERYSIDE_PROJECTIONS = True
 PROJECT_MODE: Literal["unembeddings", "name_movers"] = "name_movers" # name_movers is Neel's idea
 
@@ -389,10 +389,9 @@ if DO_QUERYSIDE_PROJECTIONS:
     for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
         model.reset_hooks()
 
-        warnings.warn("We're using 2* lol")
-
+        # warnings.warn("We're using 2* lol")
         normalized_queries = einops.repeat(
-            2 * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+            normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
