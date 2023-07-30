@@ -389,9 +389,9 @@ if DO_QUERYSIDE_PROJECTIONS:
     for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
         model.reset_hooks()
 
-        # warnings.warn("We're using 2* lol")
+        warnings.warn("We're using 2* lol")
         normalized_queries = einops.repeat(
-            normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+            2 * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
