@@ -159,7 +159,7 @@ DATA_TOKS, DATA_STR_TOKS_PARSED = process_webtext(verbose=True) # indices=list(r
 BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 
 NUM_MINIBATCHES = 1 # previouly 3
-DO_KEYSIDE_PROJECTIONS = True
+DO_KEYSIDE_PROJECTIONS = False
 DO_QUERYSIDE_PROJECTIONS = True
 
 MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
@@ -197,7 +197,7 @@ model=model.to("cuda")
 
 #%%
 
-logits_for_E_sq_QK = MODEL_RESULTS.misc["logits_for_E_sq"] # this has the future stuff screened off
+logits_for_E_sq_QK = MODEL_RESULTS.misc["logits_for_E_sq_QK"] # this has the future stuff screened off
 E_sq_QK: Float[torch.Tensor, "batch seq_len K"] = MODEL_RESULTS.E_sq_QK[10, 7]
 
 _logits_for_E_sq = MODEL_RESULTS.misc["logits_for_E_sq"] 
@@ -205,16 +205,15 @@ _E_sq = MODEL_RESULTS.E_sq[10, 7]
 
 #%%
 
-# The goal is to make a BATCH_SIZE x SEQ_LEN-1 list of losses here 
-
-# Let's decompose the goal
-# 1. Firstly reproduce that mean ablating the direct effect of 10.7 gives points that are exclusively on the y=x line DONE
-# 2. Use your get_metric_from_end_state methinks : ) DONE
-# 3. Let the experiments begin
-
 """
+The goal is to make a BATCH_SIZE x SEQ_LEN-1 list of losses here 
 
-Brainstorm of some ideas for how to QK approximations
+Let's decompose the goal
+1. Firstly reproduce that mean ablating the direct effect of 10.7 gives points that are exclusively on the y=x line DONE
+2. Use your get_metric_from_end_state methinks : ) DONE
+3. Let the experiments begin DONE
+
+Brainstorm of some ideas for how to QK approximations:
 
 1) Set query to the unembedding component, only?
 2) [While doing ??? with BOS? Making its attention score such that the attention is the same?]
@@ -227,7 +226,11 @@ i) Do Callum's embedding idea
 ii) Choose versions of these that are predicted maximally 
 iii) Project onto these unembeddings
 (still leaves possibility that some orthogonal matters more)
+
+Update: query is still fucked, try Neel quick hack use Layer 9 Name Movers then do some more comlicated things
+
 """ 
+
 #%%
 
 model.reset_hooks()
@@ -333,7 +336,6 @@ for batch_idx in range(BATCH_SIZE):
 
 #%%
 
-
 # Cribbed from `venn_diagrams_loss_recovered.py`
 
 keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
@@ -362,8 +364,6 @@ if DO_KEYSIDE_PROJECTIONS:
 else:
     keyside_projections[:] = pre_state.clone()
     keyside_orthogonals[:] = 0.0
-
-
 
 #%% 
 
