@@ -387,7 +387,7 @@ if DO_QUERYSIDE_PROJECTIONS:
         model.reset_hooks()
 
         normalized_queries = einops.repeat(
-            normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+            2*normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
             "d_model -> seq_len d_model",
             seq_len = seq_idx,
         )
@@ -418,7 +418,7 @@ if DO_QUERYSIDE_PROJECTIONS:
         #     break
 
 true_attention_pattern = attn_scores.clone().softmax(dim=-1)
-our_attention_scores = 10 * attention_score_projections.clone()
+our_attention_scores = attention_score_projections.clone()
 # our_attention_scores *= 0.5 
 our_attention_scores[:, :, 0] = -100_000 # temporarily kill BOS
 our_attention_pattern = our_attention_scores.softmax(dim=-1)
