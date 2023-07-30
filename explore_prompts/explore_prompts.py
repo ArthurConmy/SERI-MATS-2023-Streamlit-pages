@@ -334,6 +334,7 @@ for batch_idx in range(BATCH_SIZE):
 
 #%%
 
+
 # Cribbed from `venn_diagrams_loss_recovered.py`
 
 keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
@@ -363,10 +364,7 @@ else:
     keyside_projections[:] = pre_state.clone()
     keyside_orthogonals[:] = 0.0
 
-#%%
 
-attention_score_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, SEQ_LEN-1)).to(model.cfg.device)
-attention_score_projections[:] = attn_scores.clone()
 
 #%% 
 
@@ -378,7 +376,13 @@ resid_pre_mean = einops.reduce(
 
 #%%
 
+attention_score_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, SEQ_LEN-1)).to(model.cfg.device)
+attention_score_projections[:] = attn_scores.clone()
+
 if DO_QUERYSIDE_PROJECTIONS:
+
+    attention_score_projections[:] = -100_000
+
     for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
         model.reset_hooks()
 
@@ -409,24 +413,24 @@ if DO_QUERYSIDE_PROJECTIONS:
 
         attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
 
-        if batch_idx > 2:
-            warnings.warn("Early")
-            break
-
-#%%
+        # if batch_idx > 2:
+        #     warnings.warn("Early")
+        #     break
 
 true_attention_pattern = attn_scores.clone().softmax(dim=-1)
-attention_score_projections[:, :, 0] = -100_000 # temporarily kill BOS
-fake_attention_pattern = attention_score_projections.clone().softmax(dim=-1)
-fake_attention_pattern *= (-true_attention_pattern[:, :, 0] + 1.0).unsqueeze(-1) # so that BOS equal to original value
-fake_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still have attention 1.0
+our_attention_scores = attention_score_projections.clone()
+# our_attention_scores *= 0.5 
+our_attention_scores[:, :, 0] = -100_000 # temporarily kill BOS
+our_attention_pattern = attention_score_projections.clone().softmax(dim=-1)
+our_attention_pattern *= (-true_attention_pattern[:, :, 0] + 1.0).unsqueeze(-1) # so that BOS equal to original value
+our_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still have attention 1.0
 
 #%%
 
 CUTOFF = 50
 BATCH_INDEX = 2 # 2 is great!
 
-for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, fake_attention_pattern], strict=True):
+for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, our_attention_pattern], strict=True):
 # set range -10 10
 # for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_score_projections], strict=True):  
     imshow(
@@ -459,7 +463,9 @@ Probably don't use individual tokens as the projection??? Let's take model's mos
 #         keyside_projections[batch_idx, seq_idx] + RAND_ORTHOGONAL_COEFFICIENT*keyside_orthogonals[rand_batch_idx, rand_seq_idx] for seq_idx, rand_batch_idx, rand_seq_idx in zip(range(MAX_SEQ_LEN), rand_batch_indices, rand_seq_indices, strict=True)
 #     ])
 
+
 #%%
+
 
 model.set_use_split_qkv_input(True)
 model.set_use_split_qkv_normalized_input(True)
@@ -469,8 +475,8 @@ model.reset_hooks()
 
 if DO_QUERYSIDE_PROJECTIONS:
     model.add_hook(
-        get_act_name("attn_scores", 10),
-        partial(set_to_value, head_idx=7, new_value=attention_score_projections.cuda()),
+        get_act_name("pattern", 10),
+        partial(set_to_value, head_idx=7, new_value=our_attention_pattern.cuda()),
         level=1,
     )
 
@@ -481,10 +487,14 @@ elif DO_KEYSIDE_PROJECTIONS:
         level=1,
     )
 
+
 #%%
 
 projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
 model.reset_hooks()
+
+
+
 
 #%%
 
@@ -501,6 +511,8 @@ projected_loss = get_metric_from_end_state(
 ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
 ICS_list.append(ICS)
 
+
+
 # In[ ]:
 
 new_ICS = deepcopy(ICS)
@@ -514,6 +526,7 @@ scatter, results, df = generate_scatter(
     ICS=new_ICS,
     DATA_STR_TOKS_PARSED=list(itertools.chain(*MINIBATCH_DATA_STR_TOKS_PARSED)),
 )
+
 
 
 
