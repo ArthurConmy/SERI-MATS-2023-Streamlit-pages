@@ -418,10 +418,10 @@ if DO_QUERYSIDE_PROJECTIONS:
         #     break
 
 true_attention_pattern = attn_scores.clone().softmax(dim=-1)
-our_attention_scores = attention_score_projections.clone()
+our_attention_scores = 10 * attention_score_projections.clone()
 # our_attention_scores *= 0.5 
 our_attention_scores[:, :, 0] = -100_000 # temporarily kill BOS
-our_attention_pattern = attention_score_projections.clone().softmax(dim=-1)
+our_attention_pattern = our_attention_scores.softmax(dim=-1)
 our_attention_pattern *= (-true_attention_pattern[:, :, 0] + 1.0).unsqueeze(-1) # so that BOS equal to original value
 our_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still have attention 1.0
 
@@ -430,9 +430,9 @@ our_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still ha
 CUTOFF = 50
 BATCH_INDEX = 2 # 2 is great!
 
-for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, our_attention_pattern], strict=True):
+# for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, our_attention_pattern], strict=True):
 # set range -10 10
-# for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_score_projections], strict=True):  
+for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_score_projections], strict=True):  
     imshow(
         attention_pattern[BATCH_INDEX, :CUTOFF, :CUTOFF],
         x = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
@@ -494,8 +494,6 @@ projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = 
 model.reset_hooks()
 
 
-
-
 #%%
 
 projected_loss = get_metric_from_end_state(
@@ -526,9 +524,6 @@ scatter, results, df = generate_scatter(
     ICS=new_ICS,
     DATA_STR_TOKS_PARSED=list(itertools.chain(*MINIBATCH_DATA_STR_TOKS_PARSED)),
 )
-
-
-
 
 #%%
 
