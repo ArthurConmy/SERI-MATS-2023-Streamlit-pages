@@ -159,7 +159,7 @@ DATA_TOKS, DATA_STR_TOKS_PARSED = process_webtext(verbose=True) # indices=list(r
 BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 
 NUM_MINIBATCHES = 1 # previouly 3
-DO_KEYSIDE_PROJECTIONS = False
+DO_KEYSIDE_PROJECTIONS = True
 DO_QUERYSIDE_PROJECTIONS = True
 
 MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
@@ -237,7 +237,7 @@ resid_pre1_name = get_act_name("resid_pre", 5)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
-    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name] + ([get_act_name("attn_scores", 10)] if (TESTING or DO_QUERYSIDE_PROJECTIONS) else []),
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name, get_act_name("attn_scores", 10)],
 )
 
 pre_state = cache[get_act_name("resid_pre", 10)]
@@ -246,8 +246,7 @@ head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
 resid_pre1 = cache[resid_pre1_name]
 
-if TESTING or DO_QUERYSIDE_PROJECTIONS:
-    attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
+attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
 
 del cache
 gc.collect()
@@ -385,6 +384,8 @@ if DO_QUERYSIDE_PROJECTIONS:
 
     for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
         model.reset_hooks()
+
+        warnings.warn("We're using 2* lol")
 
         normalized_queries = einops.repeat(
             2*normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
