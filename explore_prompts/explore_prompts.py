@@ -183,6 +183,7 @@ DATA_STR_TOKS_PARSED= MINIBATCH_DATA_STR_TOKS_PARSED[0]
 model.to("cpu")
 MODEL_RESULTS = get_model_results(
     model,
+    cspa=False, # saves mem
     toks=_DATA_TOKS.to("cpu"),
     negative_heads=[NEGATIVE_HEAD],
     verbose=True,
@@ -200,8 +201,9 @@ logits_for_E_sq_QK = MODEL_RESULTS.misc["logits_for_E_sq_QK"] # this has the fut
 E_sq_QK: Float[torch.Tensor, "batch seq_len K"] = MODEL_RESULTS.E_sq_QK[10, 7]
 top_tokens_for_E_sq_QK = MODEL_RESULTS.misc["top_tokens_for_E_sq_QK"]
 
-_logits_for_E_sq = MODEL_RESULTS.misc["logits_for_E_sq"] 
-_E_sq = MODEL_RESULTS.E_sq[10, 7]
+if False:
+    _logits_for_E_sq = MODEL_RESULTS.misc["logits_for_E_sq"] 
+    _E_sq = MODEL_RESULTS.E_sq[10, 7]
 
 #%%
 
@@ -531,9 +533,9 @@ our_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still ha
 CUTOFF = 50
 BATCH_INDEX = 2 # 2 is great!
 
-# for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, our_attention_pattern], strict=True):
+for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, our_attention_pattern], strict=True): # I hope just in 0-1?
 # set range -10 10
-for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_score_projections], strict=True):  
+# for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_score_projections], strict=True):  
     imshow(
         attention_pattern[BATCH_INDEX, :CUTOFF, :CUTOFF],
         x = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
@@ -542,6 +544,8 @@ for name, attention_pattern in zip(["true", "ours"], [attn_scores, attention_sco
         zmin = -10, 
         zmax = 10,
     )
+
+assert our_attention_pattern.min() >= 0.0 and our_attention_pattern.max() <= 1.0, "Attention pattern is not in 0-1"
 
 #%%
 
@@ -597,7 +601,7 @@ if DO_OV_INTERVENTION_TOO:
         use_cuda=False,
         effective_embedding="W_E (including MLPs)",
         include_qk = False,
-        override_attn = our_attention_pattern_with_extra_dim,
+        # override_attn = our_attention_pattern_with_extra_dim, # remove this to see if problem arises
     )
     model.to("cuda")
     new_ICS = redone_model_results.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
