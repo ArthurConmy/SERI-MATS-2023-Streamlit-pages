@@ -192,6 +192,7 @@ MODEL_RESULTS = get_model_results(
     use_cuda=False,
     effective_embedding="W_E (including MLPs)",
     include_qk = True,
+    early_exit=True,
 )
 model=model.to("cuda")
 
@@ -601,7 +602,7 @@ if DO_OV_INTERVENTION_TOO:
         use_cuda=False,
         effective_embedding="W_E (including MLPs)",
         include_qk = False,
-        # override_attn = our_attention_pattern_with_extra_dim, # remove this to see if problem arises
+        override_attn = our_attention_pattern_with_extra_dim, # remove this to see if problem arises
     )
     model.to("cuda")
     new_ICS = redone_model_results.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
