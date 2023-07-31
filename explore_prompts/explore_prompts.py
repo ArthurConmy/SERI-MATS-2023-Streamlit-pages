@@ -155,9 +155,7 @@ BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 NUM_MINIBATCHES = 1 # previouly 3
 
 DO_KEYSIDE_PROJECTIONS = True
-DO_QUERYSIDE_PROJECTIONS = True
-
-PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers"] = "layer_9_heads" # layer_9_heads is Neel's idea
+PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers", "off"] = "layer_9_heads" # layer_9_heads is Neel's idea
 
 DO_OV_INTERVENTION_TOO = True
 
@@ -468,58 +466,58 @@ resid_pre_mean = einops.reduce(
 
 attention_score_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, SEQ_LEN-1)).to(model.cfg.device)
 attention_score_projections[:] = attn_scores.clone()
+attention_score_projections[:] = -100_000
 
-if DO_QUERYSIDE_PROJECTIONS:
+for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
+    model.reset_hooks()
 
-    attention_score_projections[:] = -100_000
-
-    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
-        model.reset_hooks()
-
+    if PROJECT_MODE != "off":
         warnings.warn("We're using 2* lol")
-        normalized_queries = einops.repeat(
-            2 * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
-            "d_model -> seq_len d_model",
-            seq_len = seq_idx,
+    normalized_queries = einops.repeat(
+        (1 + int(PROJECT_MODE != "off")) * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+        "d_model -> seq_len d_model",
+        seq_len = seq_idx,
+    )
+
+    if PROJECT_MODE == "unembeddings":
+        # project each onto the relevant unembedding
+        normalized_queries, _ = original_project(
+            normalized_queries,
+            list(einops.rearrange(model.W_U.T[E_sq_QK[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
+            test=False,
         )
-
-        if PROJECT_MODE == "unembeddings":
-            # project each onto the relevant unembedding
-            normalized_queries, _ = original_project(
-                normalized_queries,
-                list(einops.rearrange(model.W_U.T[E_sq_QK[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
-                test=False,
-            )
-        elif PROJECT_MODE == "layer_9_heads":
-            normalized_queries, _ = original_project(
-                normalized_queries,
-                list(einops.repeat(layer_nine_outs[batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads
-                test=False,
-            )
-        elif PROJECT_MODE == "maximal_movers":
-            normalized_queries, _ = original_project(
-                normalized_queries,
-                list(einops.repeat(maximal_movers_project_onto[:, batch_idx, seq_idx], "comp d_model -> comp seq d_model", seq=seq_idx).clone()),
-                test=False,
-            )
-
-        else:
-            raise ValueError(f"Unknown project mode {PROJECT_MODE}")
-
-        cur_attn_scores = dot_with_query(
-            unnormalized_keys = keyside_projections[batch_idx, 1:seq_idx+1, :],
-            unnormalized_queries = normalized_queries,
-            model = model,
-            layer_idx = 10,
-            head_idx = 7,
-            use_tqdm = False,
-            normalize_queries = False, 
-            normalize_keys = True,
-            add_query_bias = True, 
-            add_key_bias = True,
+    elif PROJECT_MODE == "layer_9_heads":
+        normalized_queries, _ = original_project(
+            normalized_queries,
+            list(einops.repeat(layer_nine_outs[batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads
+            test=False,
         )
+    elif PROJECT_MODE == "maximal_movers":
+        normalized_queries, _ = original_project(
+            normalized_queries,
+            list(einops.repeat(maximal_movers_project_onto[:, batch_idx, seq_idx], "comp d_model -> comp seq d_model", seq=seq_idx).clone()),
+            test=False,
+        )
+    elif PROJECT_MODE == "off":
+        pass # keep normalized queries the the same
 
-        attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
+    else:
+        raise ValueError(f"Unknown project mode {PROJECT_MODE}")
+
+    cur_attn_scores = dot_with_query(
+        unnormalized_keys = keyside_projections[batch_idx, 1:seq_idx+1, :],
+        unnormalized_queries = normalized_queries,
+        model = model,
+        layer_idx = 10,
+        head_idx = 7,
+        use_tqdm = False,
+        normalize_queries = False, 
+        normalize_keys = True,
+        add_query_bias = True, 
+        add_key_bias = True,
+    )
+
+    attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
 
 true_attention_pattern = attn_scores.clone().softmax(dim=-1)
 our_attention_scores = attention_score_projections.clone()
@@ -527,7 +525,9 @@ our_attention_scores = attention_score_projections.clone()
 our_attention_scores[:, :, 0] = -100_000 # temporarily kill BOS
 our_attention_pattern = our_attention_scores.softmax(dim=-1)
 our_attention_pattern *= (-true_attention_pattern[:, :, 0] + 1.0).unsqueeze(-1) # so that BOS equal to original value
-our_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0] # rows still have attention 1.0
+our_attention_pattern[:, :, 0] = true_attention_pattern[:, :, 0]
+
+assert abs((our_attention_pattern.sum(dim=2)-1.0).norm().item()) < 1e-3 # Yes, attention still sums to 1
 
 #%%
 
@@ -556,20 +556,19 @@ model.reset_hooks()
 
 # # Add the hook approximation
 
-if DO_QUERYSIDE_PROJECTIONS:
-    model.add_hook(
-        get_act_name("pattern", 10),
-        partial(set_to_value, head_idx=7, new_value=our_attention_pattern.cuda()),
-        level=1,
-    )
+model.add_hook(
+    get_act_name("pattern", 10),
+    partial(set_to_value, head_idx=7, new_value=our_attention_pattern.cuda()),
+    level=1,
+)
 
-elif DO_KEYSIDE_PROJECTIONS:
-    # This is not compatible with also doing things with OV too...
-    model.add_hook(
-        get_act_name("k_normalized_input", 10),
-        partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
-        level=1,
-    )
+# elif DO_KEYSIDE_PROJECTIONS: # Removed since it was not compatible with OV stuff
+#     # This is not compatible with also doing things with OV too...
+#     model.add_hook(
+#         get_act_name("k_normalized_input", 10),
+#         partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
+#         level=1,
+#     )
 
 projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
 model.reset_hooks()
@@ -584,7 +583,6 @@ projected_loss = get_metric_from_end_state(
 #%%
 
 if DO_OV_INTERVENTION_TOO: 
-    assert DO_QUERYSIDE_PROJECTIONS, "OV intervention only makes sense with query projections (as this recompute attn patterns)"
     model.reset_hooks()
 
     # Ugh this really sucks. It turns out in some parts of the script we chopped off the last element of the sequence, and in others we didn't
@@ -616,6 +614,9 @@ else:
 scatter, results, df = generate_scatter(
     ICS=new_ICS,
     DATA_STR_TOKS_PARSED=list(itertools.chain(*MINIBATCH_DATA_STR_TOKS_PARSED)),
+    subtext_to_cspa = ["i.e. do Callum's CSPA", "except also recompute", "attention patterns too!"],
+    cspa_y_axis_title = "QKOV-CSPA",
+    show_key_results=False,
 )
 
 #%%
