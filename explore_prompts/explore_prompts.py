@@ -49,7 +49,6 @@ clear_output()
 
 # In[5]:
 
-
 def get_effective_embedding_2(model: HookedTransformer) -> Float[Tensor, "d_vocab d_model"]:
 
     W_E = model.W_E.clone()
@@ -91,7 +90,6 @@ def get_effective_embedding_2(model: HookedTransformer) -> Float[Tensor, "d_voca
 
 # In[6]:
 
-
 model = HookedTransformer.from_pretrained(
     "gpt2-small",
     center_unembed=True,
@@ -105,18 +103,13 @@ model.set_use_attn_result(True)
 
 clear_output()
 
-
-
 # In[7]:
 
-
 W_EE_dict = get_effective_embedding_2(model)
-
 
 # ## Getting model results
 
 # In[8]:
-
 
 BATCH_SIZE = 20 # Smaller on Arthur's machine
 SEQ_LEN = 100 # 70 for viz (no more, because attn)
@@ -160,9 +153,13 @@ DATA_TOKS, DATA_STR_TOKS_PARSED = process_webtext(verbose=True) # indices=list(r
 BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 
 NUM_MINIBATCHES = 1 # previouly 3
+
 DO_KEYSIDE_PROJECTIONS = True
 DO_QUERYSIDE_PROJECTIONS = True
-PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers"] = "maximal_movers" # layer_9_heads is Neel's idea
+
+PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers"] = "layer_9_heads" # layer_9_heads is Neel's idea
+
+DO_OV_INTERVENTION_TOO = True
 
 MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
 MINIBATCH_DATA_TOKS = [DATA_TOKS[i*MINIBATCH_SIZE:(i+1)*MINIBATCH_SIZE] for i in range(NUM_MINIBATCHES)]
@@ -180,6 +177,7 @@ assert NUM_MINIBATCHES == 1, "Deprecating support for several minibatches"
 
 _DATA_TOKS = MINIBATCH_DATA_TOKS[0]
 DATA_STR_TOKS_PARSED= MINIBATCH_DATA_STR_TOKS_PARSED[0]
+
 #%%
 
 model.to("cpu")
@@ -283,41 +281,35 @@ if PROJECT_MODE == "maximal_movers":
 
 #%%
 
-all_residual_stream_tensor: Float[torch.Tensor, "component batch seq d_model"] = t.stack(list(all_residual_stream.values()), dim=0)
+if PROJECT_MODE == "maximal_movers":
 
-#%%
+    all_residual_stream_tensor: Float[torch.Tensor, "component batch seq d_model"] = t.stack(list(all_residual_stream.values()), dim=0)
 
-relevant_unembeddings: Int[torch.Tensor, "K_unembed batch seqQ d_model"] = einops.rearrange(model.W_U.T[top_tokens_for_E_sq_QK], "batch seqQ K_unembed d_model -> K_unembed batch seqQ d_model")
+    relevant_unembeddings: Int[torch.Tensor, "K_unembed batch seqQ d_model"] = einops.rearrange(model.W_U.T[top_tokens_for_E_sq_QK], "batch seqQ K_unembed d_model -> K_unembed batch seqQ d_model")
 
-#%%
 
-subspace_of_resid_pre = original_project(
-    (pre_state/pre_state.norm(dim=-1, keepdim=True)) * np.sqrt(model.cfg.d_model), # simulate LN
-    list(relevant_unembeddings[:, :, :-1]),
-    test=False,
-)
+    subspace_of_resid_pre = original_project(
+        (pre_state/pre_state.norm(dim=-1, keepdim=True)) * np.sqrt(model.cfg.d_model), # simulate LN
+        list(relevant_unembeddings[:, :, :-1]),
+        test=False,
+    )
 
-#%%
 
-subspace_of_resid_pre_parallel, subspace_of_resid_pre_orthogonal = subspace_of_resid_pre
+    subspace_of_resid_pre_parallel, subspace_of_resid_pre_orthogonal = subspace_of_resid_pre
 
-#%%
+    logit_lens_for_residual_stream = einops.einsum(
+        subspace_of_resid_pre_parallel,
+        all_residual_stream_tensor,
+        "batch seq d_model, component batch seq d_model -> component batch seq",
+    )
 
-logit_lens_for_residual_stream = einops.einsum(
-    subspace_of_resid_pre_parallel,
-    all_residual_stream_tensor,
-    "batch seq d_model, component batch seq d_model -> component batch seq",
-)
+    NUM_COMPONENTS = 10
 
-#%%
-
-NUM_COMPONENTS = 10
-
-topindices = einops.rearrange(torch.topk(
-    logit_lens_for_residual_stream,
-    dim=0,
-    k=NUM_COMPONENTS,
-).indices, "component batch seq -> batch seq component")
+    topindices = einops.rearrange(torch.topk(
+        logit_lens_for_residual_stream,
+        dim=0,
+        k=NUM_COMPONENTS,
+    ).indices, "component batch seq -> batch seq component")
 
 # going to run a few more cells to say large loss examples
 
@@ -364,27 +356,24 @@ model_loss = get_metric_from_end_state(
 
 #%%
 
-for j in range(50):
-    loss = round((head_loss[2, j] - model_loss[2, j]).item(), 5)
+if PROJECT_MODE == "maximal_movers":
+    for j in range(50):
+        loss = round((head_loss[2, j] - model_loss[2, j]).item(), 5)
 
-    print("LOSS:", loss)
-    indices = topindices[2, j]
+        print("LOSS:", loss)
+        indices = topindices[2, j]
 
-    if loss > 0.1:
-        for i in indices: 
-            print(list(all_residual_stream.keys())[i])
+        if loss > 0.1:
+            for i in indices: 
+                print(list(all_residual_stream.keys())[i])
 
-#%%
+    maximal_movers_project_onto = torch.zeros(NUM_COMPONENTS, BATCH_SIZE, SEQ_LEN, model.cfg.d_model).to(model.cfg.device)
 
-maximal_movers_project_onto = torch.zeros(NUM_COMPONENTS, BATCH_SIZE, SEQ_LEN, model.cfg.d_model).to(model.cfg.device)
-
-#%%
-
-for batch_idx in range(BATCH_SIZE):
-    for seq_idx in range(SEQ_LEN-1):
-        cur_project_onto = all_residual_stream_tensor[topindices[batch_idx, seq_idx], batch_idx, seq_idx]
-        for k in range(NUM_COMPONENTS):
-            maximal_movers_project_onto[k, batch_idx, seq_idx] = cur_project_onto[k]
+    for batch_idx in range(BATCH_SIZE):
+        for seq_idx in range(SEQ_LEN-1):
+            cur_project_onto = all_residual_stream_tensor[topindices[batch_idx, seq_idx], batch_idx, seq_idx]
+            for k in range(NUM_COMPONENTS):
+                maximal_movers_project_onto[k, batch_idx, seq_idx] = cur_project_onto[k]
 
 #%%
 
@@ -529,10 +518,6 @@ if DO_QUERYSIDE_PROJECTIONS:
 
         attention_score_projections[batch_idx, seq_idx, 1:seq_idx+1] = cur_attn_scores
 
-        # if batch_idx > 2:
-        #     warnings.warn("Early")
-        #     break
-
 true_attention_pattern = attn_scores.clone().softmax(dim=-1)
 our_attention_scores = attention_score_projections.clone()
 # our_attention_scores *= 0.5 
@@ -574,6 +559,7 @@ if DO_QUERYSIDE_PROJECTIONS:
     )
 
 elif DO_KEYSIDE_PROJECTIONS:
+    # This is not compatible with also doing things with OV too...
     model.add_hook(
         get_act_name("k_normalized_input", 10),
         partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
@@ -590,10 +576,37 @@ projected_loss = get_metric_from_end_state(
     targets = _DATA_TOKS[:, 1:],
 )
 
-ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
-ICS_list.append(ICS)
-new_ICS = deepcopy(ICS)
-new_ICS["L_CS"] = projected_loss.cpu()
+#%%
+
+if DO_OV_INTERVENTION_TOO: 
+    assert DO_QUERYSIDE_PROJECTIONS, "OV intervention only makes sense with query projections (as this recompute attn patterns)"
+    model.reset_hooks()
+
+    # Ugh this really sucks. It turns out in some parts of the script we chopped off the last element of the sequence, and in others we didn't
+    our_attention_pattern_with_extra_dim = torch.zeros(BATCH_SIZE, SEQ_LEN, SEQ_LEN).cpu()
+    our_attention_pattern_with_extra_dim[:, :-1, :-1] = our_attention_pattern
+
+    model.to("cpu")
+    redone_model_results = get_model_results(
+        model,
+        toks=_DATA_TOKS.to("cpu"),
+        negative_heads=[NEGATIVE_HEAD],
+        verbose=True,
+        K_semantic=K_semantic,
+        K_unembed=K_unembed,
+        use_cuda=False,
+        effective_embedding="W_E (including MLPs)",
+        include_qk = False,
+        override_attn = our_attention_pattern_with_extra_dim,
+    )
+    model.to("cuda")
+    new_ICS = redone_model_results.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
+
+else:
+    ICS: dict = MODEL_RESULTS.is_copy_suppression[("direct", "frozen", "mean")][10, 7]
+    ICS_list.append(ICS)
+    new_ICS = deepcopy(ICS)
+    new_ICS["L_CS"] = projected_loss.cpu()
 
 scatter, results, df = generate_scatter(
     ICS=new_ICS,
