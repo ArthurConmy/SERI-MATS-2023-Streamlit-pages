@@ -376,6 +376,18 @@ for j in range(50):
 
 #%%
 
+maximal_movers_project_onto = torch.zeros(NUM_COMPONENTS, BATCH_SIZE, SEQ_LEN, model.cfg.d_model).to(model.cfg.device)
+
+#%%
+
+for batch_idx in range(BATCH_SIZE):
+    for seq_idx in range(SEQ_LEN-1):
+        cur_project_onto = all_residual_stream_tensor[topindices[batch_idx, seq_idx], batch_idx, seq_idx]
+        for k in range(NUM_COMPONENTS):
+            maximal_movers_project_onto[k, batch_idx, seq_idx] = cur_project_onto[k]
+
+#%%
+
 # Compute the output of Head 10.7 manually?
 
 if TESTING: # This is actually fairly slow, a bit of a problem for the 
@@ -490,6 +502,12 @@ if DO_QUERYSIDE_PROJECTIONS:
             normalized_queries, _ = original_project(
                 normalized_queries,
                 list(einops.repeat(layer_nine_outs[batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads
+                test=False,
+            )
+        elif PROJECT_MODE == "maximal_movers":
+            normalized_queries, _ = original_project(
+                normalized_queries,
+                list(einops.repeat(maximal_movers_project_onto[:, batch_idx, seq_idx], "comp d_model -> comp seq d_model", seq=seq_idx).clone()),
                 test=False,
             )
 
