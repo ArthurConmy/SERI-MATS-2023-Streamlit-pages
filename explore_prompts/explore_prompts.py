@@ -250,7 +250,7 @@ head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
 resid_pre1 = cache[resid_pre1_name]
 layer_nine_outs = cache[get_act_name("result", 10)]
-layer_nine_layer_9_heads = [0, 6, 7, 9] # unsure if we'll use these...
+layer_nine_layer_9_heads = [0, 6, 7, 9] # can set to list(range(12)) to include all Layer 9
 attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
 
 #%%
@@ -489,7 +489,7 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1
     elif PROJECT_MODE == "layer_9_heads":
         normalized_queries, _ = original_project(
             normalized_queries,
-            list(einops.repeat(layer_nine_outs[batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads
+            list(einops.repeat(layer_nine_outs[layer_nine_layer_9_heads][batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads
             test=False,
         )
     elif PROJECT_MODE == "maximal_movers":
