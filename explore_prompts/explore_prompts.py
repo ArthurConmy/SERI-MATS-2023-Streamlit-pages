@@ -122,7 +122,8 @@ BATCH_SIZE = 20 # Smaller on Arthur's machine
 SEQ_LEN = 100 # 70 for viz (no more, because attn)
 TESTING = False
 
-NEGATIVE_HEADS = [(10, 7)]
+NEGATIVE_HEAD = (10, 7)
+NEGATIVE_LAYER_IDX, NEGATIVE_HEAD_IDX = NEGATIVE_HEAD
 
 def process_webtext(
     seed: int = 6,
@@ -161,7 +162,7 @@ BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 NUM_MINIBATCHES = 1 # previouly 3
 DO_KEYSIDE_PROJECTIONS = True
 DO_QUERYSIDE_PROJECTIONS = True
-PROJECT_MODE: Literal["unembeddings", "name_movers"] = "name_movers" # name_movers is Neel's idea
+PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers"] = "maximal_movers" # layer_9_heads is Neel's idea
 
 MINIBATCH_SIZE = BATCH_SIZE // NUM_MINIBATCHES
 MINIBATCH_DATA_TOKS = [DATA_TOKS[i*MINIBATCH_SIZE:(i+1)*MINIBATCH_SIZE] for i in range(NUM_MINIBATCHES)]
@@ -179,14 +180,13 @@ assert NUM_MINIBATCHES == 1, "Deprecating support for several minibatches"
 
 _DATA_TOKS = MINIBATCH_DATA_TOKS[0]
 DATA_STR_TOKS_PARSED= MINIBATCH_DATA_STR_TOKS_PARSED[0]
-i = 0
 #%%
 
 model.to("cpu")
 MODEL_RESULTS = get_model_results(
     model,
     toks=_DATA_TOKS.to("cpu"),
-    negative_heads=NEGATIVE_HEADS,
+    negative_heads=[NEGATIVE_HEAD],
     verbose=True,
     K_semantic=K_semantic,
     K_unembed=K_unembed,
@@ -200,6 +200,7 @@ model=model.to("cuda")
 
 logits_for_E_sq_QK = MODEL_RESULTS.misc["logits_for_E_sq_QK"] # this has the future stuff screened off
 E_sq_QK: Float[torch.Tensor, "batch seq_len K"] = MODEL_RESULTS.E_sq_QK[10, 7]
+top_tokens_for_E_sq_QK = MODEL_RESULTS.misc["top_tokens_for_E_sq_QK"]
 
 _logits_for_E_sq = MODEL_RESULTS.misc["logits_for_E_sq"] 
 _E_sq = MODEL_RESULTS.E_sq[10, 7]
@@ -241,7 +242,7 @@ resid_pre1_name = get_act_name("resid_pre", 5)
 
 logits, cache = model.run_with_cache(
     _DATA_TOKS[:, :-1],
-    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("result", 9), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name, get_act_name("attn_scores", 10)],
+    names_filter = lambda name: name in [get_act_name("result", 10), get_act_name("result", 9), get_act_name("resid_post", 11), final_ln_scale_hook_name, resid_pre_name, resid_pre1_name, get_act_name("attn_scores", 10)] or name.endswith("result") or name.endswith("mlp_out") or "_embed" in name,
 )
 
 pre_state = cache[get_act_name("resid_pre", 10)]
@@ -250,13 +251,75 @@ head_out = cache[get_act_name("result", 10)][:, :, 7].clone()
 scale = cache[final_ln_scale_hook_name]
 resid_pre1 = cache[resid_pre1_name]
 layer_nine_outs = cache[get_act_name("result", 10)]
-layer_nine_name_movers = [0, 6, 7, 9] # unsure if we'll use these...
-
+layer_nine_layer_9_heads = [0, 6, 7, 9] # unsure if we'll use these...
 attn_scores = cache[get_act_name("attn_scores", 10)][:, 7].clone()
 
-del cache
-gc.collect()
-t.cuda.empty_cache()
+#%%
+
+if PROJECT_MODE == "maximal_movers":
+    all_residual_stream = {}
+    for hook_name in (
+        ["hook_embed", "hook_pos_embed"]
+        + [f"blocks.{layer_idx}.hook_mlp_out" for layer_idx in range(NEGATIVE_LAYER_IDX)]
+        + [f"blocks.{layer_idx}.attn.hook_result" for layer_idx in range(NEGATIVE_LAYER_IDX)]
+        + [f"bias.{layer_idx}" for layer_idx in range(NEGATIVE_LAYER_IDX)]
+    ): # all the writing weights
+        if "bias" in hook_name:
+            layer_idx = int(hook_name.split(".")[1])
+            all_residual_stream[hook_name] = einops.repeat(model.b_O[layer_idx], "d -> b s d", b=BATCH_SIZE, s=SEQ_LEN-1).clone()
+            # all_residual_stream[hook_name + ".mlp"] = einops.repeat(model.blocks[layer_idx].mlp.b_out, "d -> b s d", b=BATCH_SIZE, s=MAX_SEQ_LEN)
+        elif "attn" in hook_name:
+            for head_idx in range(model.cfg.n_heads):
+                all_residual_stream[f"{hook_name}_{head_idx}"] = cache[hook_name][
+                    :,
+                    :,
+                    head_idx,
+                    :,
+                ]
+        else:
+            all_residual_stream[hook_name] = cache[hook_name][
+                :, :, :
+            ]
+
+#%%
+
+all_residual_stream_tensor: Float[torch.Tensor, "component batch seq d_model"] = t.stack(list(all_residual_stream.values()), dim=0)
+
+#%%
+
+relevant_unembeddings: Int[torch.Tensor, "K_unembed batch seqQ d_model"] = einops.rearrange(model.W_U.T[top_tokens_for_E_sq_QK], "batch seqQ K_unembed d_model -> K_unembed batch seqQ d_model")
+
+#%%
+
+subspace_of_resid_pre = original_project(
+    (pre_state/pre_state.norm(dim=-1, keepdim=True)) * np.sqrt(model.cfg.d_model), # simulate LN
+    list(relevant_unembeddings[:, :, :-1]),
+    test=False,
+)
+
+#%%
+
+subspace_of_resid_pre_parallel, subspace_of_resid_pre_orthogonal = subspace_of_resid_pre
+
+#%%
+
+logit_lens_for_residual_stream = einops.einsum(
+    subspace_of_resid_pre_parallel,
+    all_residual_stream_tensor,
+    "batch seq d_model, component batch seq d_model -> component batch seq",
+)
+
+#%%
+
+NUM_COMPONENTS = 10
+
+topindices = einops.rearrange(torch.topk(
+    logit_lens_for_residual_stream,
+    dim=0,
+    k=NUM_COMPONENTS,
+).indices, "component batch seq -> batch seq component")
+
+# going to run a few more cells to say large loss examples
 
 #%%
 
@@ -293,11 +356,31 @@ head_loss = get_metric_from_end_state(
 
 #%%
 
+model_loss = get_metric_from_end_state(
+    model=model,
+    end_state=end_state,
+    targets=_DATA_TOKS[:, 1:],
+)    
+
+#%%
+
+for j in range(50):
+    loss = round((head_loss[2, j] - model_loss[2, j]).item(), 5)
+
+    print("LOSS:", loss)
+    indices = topindices[2, j]
+
+    if loss > 0.1:
+        for i in indices: 
+            print(list(all_residual_stream.keys())[i])
+
+#%%
+
 # Compute the output of Head 10.7 manually?
 
 if TESTING: # This is actually fairly slow, a bit of a problem for the 
     manual_head_output = t.zeros(BATCH_SIZE, SEQ_LEN, model.cfg.d_model).cuda()
-    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):    
+    for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):
         model.reset_hooks()
         current_attention_scores = dot_with_query(
             unnormalized_keys = pre_state[batch_idx, :seq_idx+1, :],
@@ -403,7 +486,7 @@ if DO_QUERYSIDE_PROJECTIONS:
                 list(einops.rearrange(model.W_U.T[E_sq_QK[batch_idx, 1:seq_idx+1]], "seq_len ten d_model -> ten seq_len d_model")),
                 test=False,
             )
-        elif PROJECT_MODE == "name_movers":
+        elif PROJECT_MODE == "layer_9_heads":
             normalized_queries, _ = original_project(
                 normalized_queries,
                 list(einops.repeat(layer_nine_outs[batch_idx, seq_idx], "head d_model -> head seq d_model", seq=seq_idx)), # for now project onto all layer 9 heads

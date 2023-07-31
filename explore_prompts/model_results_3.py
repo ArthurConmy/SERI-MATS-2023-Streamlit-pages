@@ -607,12 +607,16 @@ def get_model_results(
             
             # Now we find the top K_unembed logit values of pairs (S, Q) for each destination token D
             # (we get the values so that we can create a boolean mask from them)
-            top_logits_for_E_sq: Float[Tensor, "batch seqQ K_unembed"] = logits_for_E_sq.flatten(-2, -1).topk(dim=-1, k=K_unembed).values
+            topk_logits_for_E_sq: Float[Tensor, "batch seqQ K_unembed"] = logits_for_E_sq.flatten(-2, -1).topk(dim=-1, k=K_unembed)
+            top_logits_for_E_sq = topk_logits_for_E_sq.values
+
             top_logits_borderline: Float[Tensor, "batch seqQ 1 1"] = top_logits_for_E_sq[..., [[-1]]]
             top_toks_for_E_sq: Int[Tensor, "N 4"] = t.nonzero(logits_for_E_sq >= top_logits_borderline)
+                        
             # model_results.misc[(layer, "logits_for_E_sq")] = logits_for_E_sq.clone()
             # model_results.misc[(layer, "top_toks_for_E_sq")] = top_toks_for_E_sq
             # model_results.misc[(layer, "logit_lens")] = logit_lens
+            
             # Above is a nice trick: each row is (b, sQ, sK, Ks), and E_sq[b, sK, Ks] is the token ID whose unembedding direction we want to preserve when moving from sK->sQ
             # Here is also a nice trick - get the earliest possible indices I can insert the vectors into (so that I don't overwrite any). It means we can slice the vectors so 
             # that there are fewer than `K_unembed` (which is the theoretical upper limit but in practice we don't get anywhere near that because for each D, the (S, Q) pairs 
