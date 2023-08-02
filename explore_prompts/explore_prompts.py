@@ -14,6 +14,7 @@ NOTE: this is cribbed from explore_prompts.ipynb, Arthur finds it much easier to
 # In[4]:
 
 from transformer_lens.cautils.notebook import *
+from tqdm import tqdm # tryna fix
 import gzip
 
 from transformer_lens.rs.callum2.explore_prompts.model_results_3 import (
@@ -43,7 +44,7 @@ from transformer_lens.rs.callum2.explore_prompts.copy_suppression_classification
 
 from transformer_lens.rs.arthurs_notebooks.arthur_utils import get_metric_from_end_state, dot_with_query, set_to_value
 
-from transformer_lens.rs.callum2.keys_fixed import project as original_project
+from transformer_lens.rs.callum2.what_even_is_the_freaking_query.keys_fixed import project as original_project
 
 clear_output()
 
@@ -111,7 +112,7 @@ W_EE_dict = get_effective_embedding_2(model)
 
 # In[8]:
 
-BATCH_SIZE = 20 # Smaller on Arthur's machine
+BATCH_SIZE = 40 # Smaller on Arthur's machine
 SEQ_LEN = 100 # 70 for viz (no more, because attn)
 TESTING = False
 
@@ -154,8 +155,8 @@ BATCH_SIZE, SEQ_LEN = DATA_TOKS.shape
 
 NUM_MINIBATCHES = 1 # previouly 3
 
-DO_KEYSIDE_PROJECTIONS = True
-PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers", "off"] = "layer_9_heads" # layer_9_heads is Neel's idea
+KEYSIDE_PROJECTIONS: Optional[Literal["the", "callum"]] = None # then test Callum
+PROJECT_MODE: Literal["unembeddings", "layer_9_heads", "maximal_movers", "off"] = "unembeddings" # layer_9_heads is Neel's idea
 
 DO_OV_INTERVENTION_TOO = True
 
@@ -412,16 +413,65 @@ my_random_tokens = model.to_tokens("The")[0]
 
 my_embeddings = t.zeros(BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model).cuda()
 
-for batch_idx in range(BATCH_SIZE):
-    current_prompt = t.cat([
-        einops.repeat(my_random_tokens, "random_seq_len -> cur_seq_len random_seq_len", cur_seq_len=SEQ_LEN-1).clone(),
-        _DATA_TOKS[batch_idx, :-1].unsqueeze(-1).clone(),
-    ],dim=1)
-    current_embeddings = model.run_with_cache(
-        current_prompt,
+if KEYSIDE_PROJECTIONS == "the":
+    warnings.warn("Need to test")
+    for batch_idx in range(BATCH_SIZE):
+        current_prompt = t.cat([
+            einops.repeat(my_random_tokens, "random_seq_len -> cur_seq_len random_seq_len", cur_seq_len=SEQ_LEN-1).clone(),
+            _DATA_TOKS[batch_idx, :-1].unsqueeze(-1).clone(),
+        ],dim=1)
+        current_embeddings = model.run_with_cache(
+            current_prompt,
+            names_filter = lambda name: name==get_act_name("resid_pre", 10),
+        )[1][get_act_name("resid_pre", 10)][torch.arange(SEQ_LEN-1), -1]
+        my_embeddings[batch_idx] = current_embeddings
+
+elif KEYSIDE_PROJECTIONS == "callum":
+
+    warnings.warn("Need to test")
+
+    mask = torch.eye(SEQ_LEN).cuda()
+    mask[:, 0] += 1
+    mask[0, 0] -= 1
+    
+    score_mask = - mask + 1.0
+    assert (score_mask.min().item()) >= 0
+    score_mask *= -1000
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    model.reset_hooks()
+    for layer_idx in range(LAYER_IDX):
+        
+        # model.add_hook(
+        #     f"blocks.{layer_idx}.attn.hook_attn_scores",
+        #     lambda z, hook: z + score_mask[None, None], # kill all but BOS and current token
+        # )
+
+        # model.add_hook( 
+        #     f"blocks.{layer_idx}.attn.hook_pattern",
+        #     lambda z, hook: (z * mask[None, None].cuda()) / (0.5 * mask[None, None].cpu()*cache[f"blocks.{hook.layer()}.attn.hook_pattern"]).sum(dim=-1, keepdim=True).mean(dim=0, keepdim=True).cuda(), # scale so that the total attention paid is the average attention paid across the batch (20); could also try batch and seq...
+        #     level=1,
+        # )
+
+        model.add_hook( # # This is the only thing that works; other rescalings suggest that the perpendicular component is more important
+            f"blocks.{layer_idx}.attn.hook_pattern",
+            lambda z, hook: (z * mask[None, None].cuda()),
+        )
+
+    cached_hook_resid_pre = model.run_with_cache(
+        mybatch.to(DEVICE),
         names_filter = lambda name: name==get_act_name("resid_pre", 10),
-    )[1][get_act_name("resid_pre", 10)][torch.arange(SEQ_LEN-1), -1]
-    my_embeddings[batch_idx] = current_embeddings
+    )[1][get_act_name("resid_pre", 10)].cpu()[:, :-1]
+
+    my_embeddings[:] = cached_hook_resid_pre.cpu()
+    del cached_hook_resid_pre
+    gc.collect()
+    t.cuda.empty_cache()
+
+else:
+    assert KEYSIDE_PROJECTIONS is None, "Invalid KEYSIDE_PROJECTIONS"
 
 #%%
 
@@ -429,7 +479,7 @@ for batch_idx in range(BATCH_SIZE):
 keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
 keyside_orthogonals = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
 
-if DO_KEYSIDE_PROJECTIONS:
+if KEYSIDE_PROJECTIONS is not None:
     for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(SEQ_LEN-1)))):
         
         project_onto = None
@@ -470,10 +520,11 @@ attention_score_projections[:] = -100_000
 for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1, SEQ_LEN-1)))):  # preserve BOS attention score
     model.reset_hooks()
 
-    if PROJECT_MODE != "off":
+    if PROJECT_MODE != "off" and PROJECT_MODE != "unembeddings":
         warnings.warn("We're using 2* lol")
+
     normalized_queries = einops.repeat(
-        (1 + int(PROJECT_MODE != "off")) * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
+        (1 + int(PROJECT_MODE not in ["off", "unembeddings"])) * normalize(pre_state[batch_idx, seq_idx, :]) * np.sqrt(model.cfg.d_model),
         "d_model -> seq_len d_model",
         seq_len = seq_idx,
     )
@@ -498,7 +549,7 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1
             test=False,
         )
     elif PROJECT_MODE == "off":
-        pass # keep normalized queries the the same
+        pass # handled by the 1 + int(...) above
 
     else:
         raise ValueError(f"Unknown project mode {PROJECT_MODE}")
@@ -510,7 +561,7 @@ for batch_idx, seq_idx in tqdm(list(itertools.product(range(BATCH_SIZE), range(1
         layer_idx = 10,
         head_idx = 7,
         use_tqdm = False,
-        normalize_queries = False, 
+        normalize_queries = (PROJECT_MODE == "unembeddings"), 
         normalize_keys = True,
         add_query_bias = True, 
         add_key_bias = True,
@@ -541,43 +592,44 @@ for name, attention_pattern in zip(["true", "ours"], [true_attention_pattern, ou
         x = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
         y = model.to_str_tokens(_DATA_TOKS[BATCH_INDEX, :CUTOFF]),   
         title = name,
-        zmin = -10, 
-        zmax = 10,
+        zmin = -1, 
+        zmax = 1,
     )
 
 assert our_attention_pattern.min() >= 0.0 and our_attention_pattern.max() <= 1.0, "Attention pattern is not in 0-1"
 
 #%%
 
-model.set_use_split_qkv_input(True)
-model.set_use_split_qkv_normalized_input(True)
-model.reset_hooks()
+if not DO_OV_INTERVENTION_TOO: # just compute the output of head w/ this attention pattern
+    model.set_use_split_qkv_input(True)
+    model.set_use_split_qkv_normalized_input(True)
+    model.reset_hooks()
 
-# # Add the hook approximation
+    # # Add the hook approximation
 
-model.add_hook(
-    get_act_name("pattern", 10),
-    partial(set_to_value, head_idx=7, new_value=our_attention_pattern.cuda()),
-    level=1,
-)
+    model.add_hook(
+        get_act_name("pattern", 10),
+        partial(set_to_value, head_idx=7, new_value=our_attention_pattern.cuda()),
+        level=1,
+    )
 
-# elif DO_KEYSIDE_PROJECTIONS: # Removed since it was not compatible with OV stuff
-#     # This is not compatible with also doing things with OV too...
-#     model.add_hook(
-#         get_act_name("k_normalized_input", 10),
-#         partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
-#         level=1,
-#     )
+    # elif DO_KEYSIDE_PROJECTIONS: # Removed since it was not compatible with OV stuff
+    #     # This is not compatible with also doing things with OV too...
+    #     model.add_hook(
+    #         get_act_name("k_normalized_input", 10),
+    #         partial(set_to_value, head_idx=7, new_value=keyside_projections.cuda()),
+    #         level=1,
+    #     )
 
-projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
-model.reset_hooks()
+    projected_head_output = model.run_with_cache(_DATA_TOKS[:, :-1], names_filter = lambda name: name==get_act_name("result", 10))[1][get_act_name("result", 10)][:, :, 7]
+    model.reset_hooks()
 
-projected_loss = get_metric_from_end_state(
-    model = model,
-    end_state = end_state - head_out + projected_head_output,
-    frozen_ln_scale = scale,
-    targets = _DATA_TOKS[:, 1:],
-)
+    projected_loss = get_metric_from_end_state(
+        model = model,
+        end_state = end_state - head_out + projected_head_output,
+        frozen_ln_scale = scale,
+        targets = _DATA_TOKS[:, 1:],
+    )
 
 #%%
 
@@ -616,6 +668,7 @@ scatter, results, df = generate_scatter(
     subtext_to_cspa = ["i.e. do Callum's CSPA", "except also recompute", "attention patterns too!"],
     cspa_y_axis_title = "QKOV-CSPA",
     show_key_results=False,
+    title = f"QKOV-CSPA with {KEYSIDE_PROJECTIONS=} and {PROJECT_MODE=}",
 )
 
 #%%
