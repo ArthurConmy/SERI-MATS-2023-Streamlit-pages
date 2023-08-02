@@ -426,7 +426,6 @@ for batch_idx in range(BATCH_SIZE):
 #%%
 
 # Cribbed from `venn_diagrams_loss_recovered.py`
-
 keyside_projections = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
 keyside_orthogonals = t.zeros((BATCH_SIZE, SEQ_LEN-1, model.cfg.d_model)).to(model.cfg.device)
 
